@@ -5,9 +5,11 @@ import (
 	"fmt" // Placeholder for error wrapping if needed
 	"time"
 
+	"github.com/google/uuid" // 推荐使用 UUID 生成 ID
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
 
+	"labelwall/biz/dal/neo4jdal"                       // 导入 DAL 包
 	network "labelwall/biz/model/relationship/network" // 确保路径正确
 )
 
@@ -24,14 +26,17 @@ type NodeRepository interface {
 
 // neo4jNodeRepo 实现了 NodeRepository 接口
 type neo4jNodeRepo struct {
-	driver neo4j.DriverWithContext
+	driver  neo4j.DriverWithContext
+	nodeDAL neo4jdal.NodeDAL
 }
 
 // NewNodeRepository 创建一个新的 NodeRepository 实例
-func NewNodeRepository(driver neo4j.DriverWithContext) NodeRepository {
-	// 可以在这里添加必要的索引和约束创建逻辑，确保它们在服务启动时存在
-	// 例如: initNodeSchema(driver)
-	return &neo4jNodeRepo{driver: driver}
+func NewNodeRepository(driver neo4j.DriverWithContext, nodeDAL neo4jdal.NodeDAL) NodeRepository {
+	// 约束和索引的创建仍然建议放在 infrastructure 或 main 初始化中
+	return &neo4jNodeRepo{
+		driver:  driver,
+		nodeDAL: nodeDAL,
+	}
 }
 
 // CreateNode 在 Neo4j 中创建一个新节点
@@ -39,100 +44,73 @@ func (r *neo4jNodeRepo) CreateNode(ctx context.Context, req *network.CreateNodeR
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
-	// 使用UUID或其他方式生成唯一节点ID
-	// 这里暂时使用时间戳作为示例，生产环境应使用更可靠的唯一ID生成策略
-	nodeID := fmt.Sprintf("%s-%d", req.Type.String(), time.Now().UnixNano())
+	// 1. 生成唯一业务 ID (Repo 层职责)
+	// nodeID := fmt.Sprintf("%s-%d", req.Type.String(), time.Now().UnixNano()) // 旧方法
+	nodeID := uuid.NewString() // 使用 UUID
 
-	nodeResult, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		// 构建节点属性Map
-		properties := map[string]any{
-			"id":   nodeID, // 使用生成的业务ID
-			"name": req.Name,
-			// Neo4j驱动通常会自动处理 nil 值，无需显式检查 optional 字段是否为 nil
-			"avatar":     req.Avatar,
-			"profession": req.Profession,
-		}
-		// 合并可选的 properties
-		if req.Properties != nil {
-			for k, v := range req.Properties {
-				properties[k] = v // 注意：确保 key 不会覆盖 id, name 等核心属性
+	// 2. 构建节点属性 Map (Repo 层职责)
+	properties := map[string]any{
+		"id":   nodeID,
+		"name": req.Name,
+		// 可选字段处理
+		"avatar":     req.Avatar,
+		"profession": req.Profession,
+		// 添加时间戳等通用字段
+		"created_at": time.Now().UTC(),
+		"updated_at": time.Now().UTC(),
+	}
+	if req.Properties != nil {
+		for k, v := range req.Properties {
+			if _, exists := properties[k]; !exists { // 避免覆盖核心属性
+				properties[k] = v
 			}
 		}
+	}
 
-		// 构建 Cypher 查询
-		// 使用 $param 语法进行参数化，防止注入
-		// 使用 NodeType 的字符串表示作为标签
-		query := fmt.Sprintf(`
-            CREATE (n:%s $props)
-            RETURN n`, req.Type.String()) // NodeType -> Label (e.g., PERSON)
-
-		result, err := tx.Run(ctx, query, map[string]any{"props": properties})
-		if err != nil {
-			return nil, fmt.Errorf("运行创建节点查询失败: %w", err)
-		}
-
-		record, err := result.Single(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("获取创建节点结果失败: %w", err)
-		}
-
-		nodeInterface, ok := record.Get("n")
-		if !ok {
-			return nil, fmt.Errorf("无法从结果中获取节点 'n'")
-		}
-
-		dbNode, ok := nodeInterface.(dbtype.Node)
-		if !ok {
-			return nil, fmt.Errorf("结果中的 'n' 不是有效的节点类型")
-		}
-
-		return mapDbNodeToThriftNode(dbNode, req.Type), nil // 将 Neo4j 节点映射回 Thrift 节点结构
-	})
-
+	// 3. 调用 DAL 层执行数据库操作
+	// 注意：这里直接在 session 上调用 DAL 方法。如果需要跨多个 DAL 操作的事务，
+	// 则应在此处开始事务(session.BeginTransaction)，并将事务对象(tx)传递给 DAL 方法。
+	// 为简单起见，这里假设每个操作都在自己的隐式事务中（通过 session 调用 DAL 的 ExecuteWrite）。
+	dbNode, err := r.nodeDAL.ExecCreateNode(ctx, session, req.Type, properties)
 	if err != nil {
-		return nil, err // 错误已在 ExecuteWrite 中封装
+		return nil, fmt.Errorf("Repo: 调用 DAL 创建节点失败: %w", err)
 	}
 
-	createdNode, ok := nodeResult.(*network.Node)
-	if !ok {
-		return nil, fmt.Errorf("事务返回了非预期的节点类型")
-	}
-
-	return createdNode, nil
+	// 4. 将 DAL 返回的 dbtype.Node 映射为业务模型 network.Node (Repo 层职责)
+	return mapDbNodeToThriftNode(dbNode, req.Type), nil
 }
 
 // mapDbNodeToThriftNode 将 Neo4j 节点对象转换为 Thrift Node 对象
-// 需要传入 NodeType，因为 Neo4j 节点可能有多个标签，而 Thrift 模型只有一个 type 字段
+// (这个函数保留在 Repo 层，因为它处理的是业务模型映射)
 func mapDbNodeToThriftNode(dbNode dbtype.Node, nodeType network.NodeType) *network.Node {
 	props := dbNode.Props
 	node := &network.Node{
-		Type: nodeType, // 使用传入的类型
-		// 从属性中提取核心字段
-		ID:         getStringProp(props, "id", ""),   // 修复：使用大写的 ID
-		Name:       getStringProp(props, "name", ""), // 假设 name 总是存在
+		Type:       nodeType,
+		ID:         getStringProp(props, "id", ""),
+		Name:       getStringProp(props, "name", ""),
 		Avatar:     getOptionalStringProp(props, "avatar"),
 		Profession: getOptionalStringProp(props, "profession"),
-		Properties: make(map[string]string), // 初始化 map
+		Properties: make(map[string]string),
 	}
 
-	// 填充其他属性到 Properties map
-	coreProps := map[string]struct{}{"id": {}, "name": {}, "avatar": {}, "profession": {}} // 这里的 "id" 是 Neo4j 属性名，保持小写
+	coreProps := map[string]struct{}{ // 包含所有核心和通用字段
+		"id": {}, "name": {}, "avatar": {}, "profession": {}, "created_at": {}, "updated_at": {},
+	}
 	for key, val := range props {
 		if _, isCore := coreProps[key]; !isCore {
-			if strVal, ok := val.(string); ok { // 假设所有额外属性都是 string
+			if strVal, ok := val.(string); ok {
 				node.Properties[key] = strVal
-			}
-			// 可以根据需要添加对其他类型的处理
+			} // 可以添加对其他类型的处理，例如 time.Time -> string
 		}
 	}
 	if len(node.Properties) == 0 {
-		node.Properties = nil // 如果没有额外属性，设为 nil
+		node.Properties = nil
 	}
 
 	return node
 }
 
-// --- 辅助函数 ---
+// --- 辅助函数 (保留在 Repo 层或移至公共 pkg) ---
 
 func getStringProp(props map[string]any, key string, defaultValue string) string {
 	if val, ok := props[key].(string); ok {
@@ -149,42 +127,46 @@ func getOptionalStringProp(props map[string]any, key string) *string {
 	return nil
 }
 
-// --- 其他方法的占位实现 ---
+// --- 其他方法的占位实现 (需要重构以调用 DAL) ---
 
 func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, error) {
-	// TODO: 实现 GetNode 查询
-	fmt.Printf("TODO: 实现 GetNode 查询, id: %s\n", id)
-	return nil, fmt.Errorf("GetNode 未实现")
+	// TODO: 重构 GetNode
+	// 1. 获取 Session
+	// 2. 调用 r.nodeDAL.ExecGetNodeByID(ctx, session, id)
+	// 3. 处理错误
+	// 4. 调用 mapDbNodeToThriftNode 映射结果
+	fmt.Printf("TODO: Repo 实现 GetNode, id: %s\n", id)
+	return nil, fmt.Errorf("Repo: GetNode 未实现")
 }
 
 func (r *neo4jNodeRepo) UpdateNode(ctx context.Context, req *network.UpdateNodeRequest) (*network.Node, error) {
-	// TODO: 实现 UpdateNode 查询
-	fmt.Printf("TODO: 实现 UpdateNode 查询, id: %s\n", req.ID) // 修复：使用大写的 ID
-	return nil, fmt.Errorf("UpdateNode 未实现")
+	// TODO: 重构 UpdateNode
+	fmt.Printf("TODO: Repo 实现 UpdateNode, id: %s\n", req.ID) // 修复：使用大写的 ID
+	return nil, fmt.Errorf("Repo: UpdateNode 未实现")
 }
 
 func (r *neo4jNodeRepo) DeleteNode(ctx context.Context, id string) error {
-	// TODO: 实现 DeleteNode 查询
-	fmt.Printf("TODO: 实现 DeleteNode 查询, id: %s\n", id)
-	return fmt.Errorf("DeleteNode 未实现")
+	// TODO: 重构 DeleteNode
+	fmt.Printf("TODO: Repo 实现 DeleteNode, id: %s\n", id)
+	return fmt.Errorf("Repo: DeleteNode 未实现")
 }
 
 func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNodesRequest) ([]*network.Node, int32, error) {
-	// TODO: 实现 SearchNodes 查询
-	fmt.Printf("TODO: 实现 SearchNodes 查询, keyword: %s\n", req.Keyword)
-	return nil, 0, fmt.Errorf("SearchNodes 未实现")
+	// TODO: 重构 SearchNodes
+	fmt.Printf("TODO: Repo 实现 SearchNodes, keyword: %s\n", req.Keyword)
+	return nil, 0, fmt.Errorf("Repo: SearchNodes 未实现")
 }
 
 func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkRequest) ([]*network.Node, []*network.Relation, error) {
-	// TODO: 实现 GetNetwork 查询
-	fmt.Printf("TODO: 实现 GetNetwork 查询, profession: %s\n", req.Profession)
-	return nil, nil, fmt.Errorf("GetNetwork 未实现")
+	// TODO: 重构 GetNetwork
+	fmt.Printf("TODO: Repo 实现 GetNetwork, profession: %s\n", req.Profession)
+	return nil, nil, fmt.Errorf("Repo: GetNetwork 未实现")
 }
 
 func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest) ([]*network.Node, []*network.Relation, error) {
-	// TODO: 实现 GetPath 查询
-	fmt.Printf("TODO: 实现 GetPath 查询, source: %s, target: %s\n", req.SourceID, req.TargetID) // 修复：使用大写的 SourceID, TargetID
-	return nil, nil, fmt.Errorf("GetPath 未实现")
+	// TODO: 重构 GetPath
+	fmt.Printf("TODO: Repo 实现 GetPath, source: %s, target: %s\n", req.SourceID, req.TargetID) // 修复：使用大写的 SourceID, TargetID
+	return nil, nil, fmt.Errorf("Repo: GetPath 未实现")
 }
 
 // 可选：添加一个初始化函数来创建索引和约束

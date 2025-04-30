@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid" // 推荐使用 UUID 生成关系 ID
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
 
-	network "labelwall/biz/model/relationship/network" // 确保路径正确
+	"labelwall/biz/dal/neo4jdal" // 导入 DAL 包
+	network "labelwall/biz/model/relationship/network"
 )
 
 // RelationRepository 定义了关系数据访问的操作
@@ -22,12 +24,16 @@ type RelationRepository interface {
 
 // neo4jRelationRepo 实现了 RelationRepository 接口
 type neo4jRelationRepo struct {
-	driver neo4j.DriverWithContext
+	driver      neo4j.DriverWithContext // Repo 层持有 Driver 以管理 Session/Transaction
+	relationDAL neo4jdal.RelationDAL    // 依赖 DAL 接口
 }
 
 // NewRelationRepository 创建一个新的 RelationRepository 实例
-func NewRelationRepository(driver neo4j.DriverWithContext) RelationRepository {
-	return &neo4jRelationRepo{driver: driver}
+func NewRelationRepository(driver neo4j.DriverWithContext, relationDAL neo4jdal.RelationDAL) RelationRepository {
+	return &neo4jRelationRepo{
+		driver:      driver,
+		relationDAL: relationDAL,
+	}
 }
 
 // CreateRelation 在 Neo4j 中创建两个节点之间的新关系
@@ -35,81 +41,38 @@ func (r *neo4jRelationRepo) CreateRelation(ctx context.Context, req *network.Cre
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
-	// 生成唯一关系ID
-	relationID := fmt.Sprintf("%s-%s-%d", req.Source, req.Target, time.Now().UnixNano())
+	// 1. 生成唯一关系 ID (Repo 层职责)
+	// relationID := fmt.Sprintf("%s-%s-%d", req.Source, req.Target, time.Now().UnixNano()) // 旧方法
+	relationID := uuid.NewString() // 使用 UUID
 
-	relResult, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		// 构建关系属性Map
-		properties := map[string]any{
-			"id":    relationID, // 关系业务 ID
-			"label": req.Label,
-		}
-		if req.Properties != nil {
-			for k, v := range req.Properties {
-				properties[k] = v // 合并可选属性
+	// 2. 构建关系属性 Map (Repo 层职责)
+	properties := map[string]any{
+		"id":    relationID,
+		"label": req.Label,
+		// 添加时间戳
+		"created_at": time.Now().UTC(),
+		"updated_at": time.Now().UTC(),
+	}
+	if req.Properties != nil {
+		for k, v := range req.Properties {
+			if _, exists := properties[k]; !exists { // 避免覆盖核心属性
+				properties[k] = v
 			}
 		}
+	}
 
-		// 构建 Cypher 查询
-		// 使用参数化查询匹配源节点和目标节点
-		// 关系类型使用 RelationType 的字符串表示
-		query := fmt.Sprintf(`
-            MATCH (source {id: $sourceId}), (target {id: $targetId})
-            CREATE (source)-[rel:%s $props]->(target)
-            RETURN rel, source.id AS sourceId, target.id AS targetId`, // 使用占位符确保类型正确
-			req.Type.String(), // RelationType -> RELATION_TYPE (e.g., COLLEAGUE)
-		)
-
-		result, err := tx.Run(ctx, query, map[string]any{
-			"sourceId": req.Source,
-			"targetId": req.Target,
-			"props":    properties,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("运行创建关系查询失败: %w", err)
-		}
-
-		record, err := result.Single(ctx)
-		if err != nil {
-			// 可能是节点未找到，需要更具体的错误处理
-			if neo4j.IsNeo4jError(err) {
-				// 检查特定的错误代码，例如节点不存在等
-			}
-			return nil, fmt.Errorf("获取创建关系结果失败: %w", err)
-		}
-
-		relInterface, ok := record.Get("rel")
-		if !ok {
-			return nil, fmt.Errorf("无法从结果中获取关系 'rel'")
-		}
-
-		dbRel, ok := relInterface.(dbtype.Relationship)
-		if !ok {
-			return nil, fmt.Errorf("结果中的 'rel' 不是有效的关系类型")
-		}
-
-		// 从记录中获取实际匹配到的 sourceId 和 targetId
-		sourceIdVal, _ := record.Get("sourceId")
-		targetIdVal, _ := record.Get("targetId")
-
-		// 将 Neo4j 关系映射回 Thrift 关系结构
-		return mapDbRelationshipToThriftRelation(dbRel, req.Type, sourceIdVal.(string), targetIdVal.(string)), nil
-	})
-
+	// 3. 调用 DAL 层执行数据库操作
+	dbRel, err := r.relationDAL.ExecCreateRelation(ctx, session, req.Source, req.Target, req.Type, properties)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("Repo: 调用 DAL 创建关系失败: %w", err)
 	}
 
-	createdRelation, ok := relResult.(*network.Relation)
-	if !ok {
-		return nil, fmt.Errorf("事务返回了非预期的关系类型")
-	}
-
-	return createdRelation, nil
+	// 4. 将 DAL 返回的 dbtype.Relationship 映射为业务模型 network.Relation (Repo 层职责)
+	return mapDbRelationshipToThriftRelation(dbRel, req.Type, req.Source, req.Target), nil
 }
 
 // mapDbRelationshipToThriftRelation 将 Neo4j 关系对象转换为 Thrift Relation 对象
-// 需要传入 RelationType, source ID 和 target ID，因为基础 dbtype.Relationship 不包含这些
+// (这个函数保留在 Repo 层)
 func mapDbRelationshipToThriftRelation(dbRel dbtype.Relationship, relType network.RelationType, sourceID, targetID string) *network.Relation {
 	props := dbRel.Props
 	relation := &network.Relation{
@@ -121,8 +84,9 @@ func mapDbRelationshipToThriftRelation(dbRel dbtype.Relationship, relType networ
 		Properties: make(map[string]string),
 	}
 
-	// 填充其他属性
-	coreProps := map[string]struct{}{"id": {}, "label": {}}
+	coreProps := map[string]struct{}{ // 包含所有核心和通用字段
+		"id": {}, "label": {}, "created_at": {}, "updated_at": {},
+	}
 	for key, val := range props {
 		if _, isCore := coreProps[key]; !isCore {
 			if strVal, ok := val.(string); ok {
@@ -137,28 +101,35 @@ func mapDbRelationshipToThriftRelation(dbRel dbtype.Relationship, relType networ
 	return relation
 }
 
-// --- 其他方法的占位实现 ---
+// --- 辅助函数 (应移至公共 pkg 或从 node_repo 导入) ---
+// ... getStringProp, getOptionalStringProp ...
+
+// --- 其他方法的占位实现 (需要重构以调用 DAL) ---
 
 func (r *neo4jRelationRepo) GetRelation(ctx context.Context, id string) (*network.Relation, error) {
-	// TODO: 实现 GetRelation 查询
-	fmt.Printf("TODO: 实现 GetRelation 查询, id: %s\n", id)
-	return nil, fmt.Errorf("GetRelation 未实现")
+	// TODO: 重构 GetRelation
+	// 1. 获取 Session
+	// 2. 调用 r.relationDAL.ExecGetRelationByID(ctx, session, id)
+	// 3. 处理错误
+	// 4. 调用 mapDbRelationshipToThriftRelation 映射结果
+	fmt.Printf("TODO: Repo 实现 GetRelation, id: %s\n", id)
+	return nil, fmt.Errorf("Repo: GetRelation 未实现")
 }
 
 func (r *neo4jRelationRepo) UpdateRelation(ctx context.Context, req *network.UpdateRelationRequest) (*network.Relation, error) {
-	// TODO: 实现 UpdateRelation 查询
-	fmt.Printf("TODO: 实现 UpdateRelation 查询, id: %s\n", req.ID)
-	return nil, fmt.Errorf("UpdateRelation 未实现")
+	// TODO: 重构 UpdateRelation
+	fmt.Printf("TODO: Repo 实现 UpdateRelation, id: %s\n", req.ID)
+	return nil, fmt.Errorf("Repo: UpdateRelation 未实现")
 }
 
 func (r *neo4jRelationRepo) DeleteRelation(ctx context.Context, id string) error {
-	// TODO: 实现 DeleteRelation 查询
-	fmt.Printf("TODO: 实现 DeleteRelation 查询, id: %s\n", id)
-	return fmt.Errorf("DeleteRelation 未实现")
+	// TODO: 重构 DeleteRelation
+	fmt.Printf("TODO: Repo 实现 DeleteRelation, id: %s\n", id)
+	return fmt.Errorf("Repo: DeleteRelation 未实现")
 }
 
 func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.GetNodeRelationsRequest) ([]*network.Relation, int32, error) {
-	// TODO: 实现 GetNodeRelations 查询
-	fmt.Printf("TODO: 实现 GetNodeRelations 查询, node_id: %s\n", req.NodeID)
-	return nil, 0, fmt.Errorf("GetNodeRelations 未实现")
+	// TODO: 重构 GetNodeRelations
+	fmt.Printf("TODO: Repo 实现 GetNodeRelations, node_id: %s\n", req.NodeID)
+	return nil, 0, fmt.Errorf("Repo: GetNodeRelations 未实现")
 }

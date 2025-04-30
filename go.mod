@@ -5,6 +5,7 @@ go 1.22.4
 require (
 	github.com/apache/thrift v0.13.0
 	github.com/cloudwego/hertz v0.9.7
+	github.com/google/uuid v1.6.0
 	github.com/neo4j/neo4j-go-driver/v5 v5.28.0
 )
 
