@@ -4,6 +4,7 @@ package network
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -23,6 +24,36 @@ func GetNetwork(ctx context.Context, c *app.RequestContext) {
 
 	resp := new(network.GetNetworkResponse)
 
+	resp.Success = true
+
+	respMessage := string(c.Path())
+
+	resp.Nodes = make([]*network.Node, 0)
+
+	for k, v := range c.Params {
+		s := fmt.Sprintf("%s %s", k, v)
+		respMessage += s
+	}
+
+	resp.Message = respMessage
+
+	resp.Nodes = append(resp.Nodes, &network.Node{
+		ID:         "01",
+		Type:       1,
+		Name:       "hachimi",
+		Avatar:     nil,
+		Profession: nil,
+		Properties: nil,
+	})
+
+	resp.Nodes = append(resp.Nodes, &network.Node{
+		ID:         "02",
+		Type:       1,
+		Name:       "dy",
+		Avatar:     nil,
+		Profession: nil,
+		Properties: nil,
+	})
 	c.JSON(consts.StatusOK, resp)
 }
 
