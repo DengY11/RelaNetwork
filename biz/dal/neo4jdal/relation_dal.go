@@ -198,26 +198,41 @@ func (d *neo4jRelationDAL) ExecUpdateRelation(ctx context.Context, session neo4j
 }
 
 // ExecDeleteRelation 执行删除关系的 Cypher。
-// 返回错误信息，如果关系未找到则不报错（幂等性）。
+// 返回错误信息，如果关系未找到则报错。
 func (d *neo4jRelationDAL) ExecDeleteRelation(ctx context.Context, session neo4j.SessionWithContext, id string) error {
 	// 执行写事务。
-	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	resultSummary, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		// 匹配并删除指定 ID 的关系。
 		query := `MATCH ()-[r {id: $id}]->() DELETE r`
-		_, err := tx.Run(ctx, query, map[string]any{"id": id}) // Corrected: Just check the error
+		result, err := tx.Run(ctx, query, map[string]any{"id": id})
 		if err != nil {
-			return nil, err // 返回查询执行错误。
+			return nil, fmt.Errorf("query execution failed: %w", err)
 		}
-		// 检查删除计数器是可选的，取决于业务需求。
-		// 如果需要确认确实删除了，可以像 ExecDeleteNode 一样检查 summary。
-		// 如果需要 summary, 则需要使用 result, _ := tx.Run(...) 并调用 result.Consume()
-		return nil, nil // 简单返回 nil 表示事务成功（即使没找到关系）
+		// 获取并返回结果摘要，用于检查删除计数
+		summary, err := result.Consume(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("result consumption failed: %w", err)
+		}
+		return summary, nil
 	})
 	// 处理事务错误。
 	if err != nil {
-		return fmt.Errorf("DAL: 运行删除关系查询失败: %w", err)
+		return fmt.Errorf("DAL: 删除关系事务失败: %w", err)
 	}
-	return nil
+
+	// 事务成功后，检查结果摘要。
+	if summary, ok := resultSummary.(neo4j.ResultSummary); ok {
+		// 检查计数器中被删除的关系数量。
+		if summary.Counters().RelationshipsDeleted() == 0 {
+			// 如果没有关系被删除，说明具有该 ID 的关系不存在。
+			return fmt.Errorf("DAL: relation with id '%s' not found for deletion", id)
+		}
+		// 关系删除成功。
+		return nil
+	}
+
+	// 如果 ExecuteWrite 成功但返回的不是预期的 ResultSummary 类型。
+	return fmt.Errorf("DAL: 删除关系事务返回了非预期的结果类型")
 }
 
 // ExecGetNodeRelations 执行获取特定节点所有关系的 Cypher。
