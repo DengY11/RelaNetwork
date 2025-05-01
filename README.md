@@ -29,7 +29,7 @@
 
 - **Hertz**: 字节跳动开源的高性能 Go HTTP 框架，用于构建 API 服务
 - **Thrift**: 跨语言的 RPC 框架，用于定义服务接口和数据结构
-- **Go**: 后端开发语言，版本 1.16+
+- **Go**: 后端开发语言，版本 1.20+
 
 ### 2.2 数据存储
 
@@ -425,6 +425,8 @@ struct Relation {
 - **查询参数**:
     - `profession` - 职业名称
     - `depth` - 可选，查询深度，默认为1
+    - `limit` - 可选，返回结果数量限制
+    - `offset` - 可选，分页偏移量
 - **响应**:
   ```json
   {
@@ -464,7 +466,7 @@ struct Relation {
     - `source_id` - 起始节点ID
     - `target_id` - 目标节点ID
     - `max_depth` - 可选，最大查询深度，默认为3
-    - `types` - 可选，关系类型列表，以逗号分隔
+    - `rel_types` - 可选，关系类型列表，以逗号分隔
 - **响应**:
   ```json
   {
@@ -514,50 +516,28 @@ struct Relation {
 ### 6.1 项目结构
 
 ```
-labelwall/
-├── api/
-│   └── protos/
-│       └── relationship-network.thrift   # 服务接口定义 (IDL)
-├── biz/                                  # 业务逻辑核心目录
-│   ├── handler/                          # API 处理层: 存放 Hertz HTTP Handler，负责解析请求、参数校验、调用 Service 层并构造响应。
-│   │   └── relationship/
-│   │       └── network/
-│   │           └── network_service.go    # NetworkService 对应的 Handler 实现
-│   ├── model/                            # 模型层: 存放由 IDL 生成的 Go 数据结构 (struct, enum)，用于数据传输。
-│   │   └── relationship/
-│   │       └── network/
-│   │           └── relationship-network.go # 由 Thrift IDL 生成的模型代码
-│   ├── router/                           # 路由层: 定义 Hertz HTTP 路由规则，将 URL 路径映射到具体的 Handler 函数。
-│   │   └── relationship/
-│   │       └── network/
-│   │           └── register.go           # NetworkService 相关路由的注册
-│   ├── repo/                             # 数据访问层 (DAL/Repository): 负责与数据存储交互。
-│   │   └── neo4jrepo/                    # Neo4j 存储的具体实现
-│   │       ├── node_repo.go              # 节点相关的数据库操作 (CRUD, Search, etc.)
-│   │       └── relation_repo.go          # 关系相关的数据库操作 (CRUD, Get by Node, etc.)
-│   └── service/                          # 服务层: 封装核心业务逻辑，编排对 Repo 层的调用，处理复杂业务规则。
-│       └── network_service.go            # NetworkService 接口定义及业务逻辑实现
-├── cmd/
-│   └── main.go                           # 程序入口: 初始化应用（配置、数据库、路由等），启动 Hertz 服务。
-├── config/
-│   └── config.yaml                       # 配置文件: 存放数据库连接信息、服务器端口等配置。
-├── infrastructure/                       # 基础设施层: 存放与外部系统或底层服务交互的通用代码。
-│   └── database/                         # 数据库相关基础设施
-│       ├── connection.go                 # 定义数据库配置结构体，可能包含连接池管理逻辑。
-│       └── init.go                       # 数据库初始化逻辑：创建连接、检查连通性、应用 Schema（索引、约束）。
-├── pkg/                                  # 公共库/工具包
-│   ├── constants/                        # 常量定义 (如错误码、默认值等)
-│   ├── errors/                           # 自定义错误类型
-│   └── util/                             # 通用工具函数
-├── build.sh                              # 构建脚本: 用于编译 Go 程序，生成可执行文件。
-├── go.mod                                # Go 模块定义文件
-├── go.sum                                # Go 模块依赖校验和
-└── README.md                             # 项目说明文档 (本文件)
+relationship-network/
+├── relationship-network.thrift       # Thrift IDL
+├── generate_code.sh                  # Thrift 代码生成脚本
+├── build.sh                          # 构建脚本
+├── go.mod, go.sum                    # Go 模块依赖
+├── main.go                           # 程序入口
+├── router.go, router_gen.go          # 路由注册与生成
+├── biz/                              # 业务逻辑核心目录
+│   ├── handler/relationship/network/ # Hertz Handler 层
+│   ├── model/relationship/network/   # Thrift 生成的模型代码
+│   ├── repo/neo4jrepo/               # Repository 层实现
+│   └── service/relationship/network/ # Service 层实现
+├── infrastructure/                   # 基础设施目录
+│   └── database/                     # 初始化与连接实现
+├── script/                           # 脚本目录
+├── output/                           # 产物输出目录
+└── README.md                         # 项目说明文档
 ```
 
 ### 6.2 数据存储实现
 
-LabelWall 使用 Neo4j 图数据库存储关系网络数据。图数据库的特性非常适合存储和查询复杂的关系网络，支持高效的路径查找和网络遍历。
+relationship-network  使用 Neo4j 图数据库存储关系网络数据。图数据库的特性非常适合存储和查询复杂的关系网络，支持高效的路径查找和网络遍历。
 
 节点和关系在 Neo4j 中的存储结构示例：
 
@@ -622,7 +602,7 @@ func CreateNode(ctx context.Context, c *app.RequestContext) {
 
 ### 7.1 环境要求
 
-- Go 1.16+
+- Go 1.20+
 - Neo4j 4.0+
 - Redis (可选，用于缓存)
 
