@@ -256,7 +256,7 @@ func (d *neo4jRelationDAL) ExecGetNodeRelations(ctx context.Context, session neo
 
 		// 动态构建 MATCH 和 WHERE 子句。
 		var matchBuilder, whereBuilder strings.Builder
-		matchBuilder.WriteString(fmt.Sprintf("MATCH (n {id: $nodeId})"))
+		matchBuilder.WriteString("MATCH (n {id: $nodeId})")
 		// 根据方向构建匹配模式。
 		if outgoing && incoming {
 			matchBuilder.WriteString("-[r]-(neighbor)") // 双向
