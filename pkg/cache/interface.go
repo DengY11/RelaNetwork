@@ -61,3 +61,9 @@ type NodeAndByteCache interface {
 	NodeCache
 	Cache[[]byte] // 嵌入通用字节缓存接口
 }
+
+// RelationAndByteCache 组合了关系特定缓存和通用字节缓存的功能
+type RelationAndByteCache interface {
+	RelationCache
+	Cache[[]byte] // 嵌入通用字节缓存接口
+}

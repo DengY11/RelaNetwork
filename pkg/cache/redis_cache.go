@@ -243,3 +243,6 @@ var _ RelationCache = (*redisCache)(nil)
 
 // 确保 redisCache 实现了新的组合接口
 var _ NodeAndByteCache = (*redisCache)(nil)
+
+// 确保 redisCache 实现了新的关系组合接口
+var _ RelationAndByteCache = (*redisCache)(nil)
