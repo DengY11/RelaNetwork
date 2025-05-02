@@ -2,6 +2,7 @@ package neo4jrepo
 
 import (
 	"context" // 用于错误处理
+	"errors"  // 用于缓存错误检查
 	"fmt"     // 用于错误检查
 	"time"
 
@@ -10,27 +11,34 @@ import (
 
 	"labelwall/biz/dal/neo4jdal"
 	network "labelwall/biz/model/relationship/network"
-	//TODO "labelwall/pkg/cache" // 缓存包（待实现）
+	"labelwall/pkg/cache" // 引入缓存包
+)
+
+const (
+	// 默认节点缓存时间
+	defaultNodeTTL = 1 * time.Hour
 )
 
 // neo4jNodeRepo 实现了 NodeRepository 接口
 type neo4jNodeRepo struct {
-	driver  neo4j.DriverWithContext
-	nodeDAL neo4jdal.NodeDAL
-	// cache   cache.NodeCache // 节点缓存接口（待实现）
+	driver    neo4j.DriverWithContext
+	nodeDAL   neo4jdal.NodeDAL
+	nodeCache cache.NodeCache // 添加节点缓存接口
 }
 
 // NewNodeRepository 创建一个新的 NodeRepository 实例
-// 依赖注入 Neo4j 驱动、Node DAL 实现和可选的缓存实现
-func NewNodeRepository(driver neo4j.DriverWithContext, nodeDAL neo4jdal.NodeDAL /*, cache cache.NodeCache*/) NodeRepository {
+// 依赖注入 Neo4j 驱动、Node DAL 实现和 NodeCache 实现
+func NewNodeRepository(driver neo4j.DriverWithContext, nodeDAL neo4jdal.NodeDAL, nodeCache cache.NodeCache) NodeRepository {
 	return &neo4jNodeRepo{
-		driver:  driver,
-		nodeDAL: nodeDAL,
-		//TODO: cache:   cache,
+		driver:    driver,
+		nodeDAL:   nodeDAL,
+		nodeCache: nodeCache, // 存储缓存实例
 	}
 }
 
 // CreateNode 在 Neo4j 中创建一个新节点
+// 读旁路 这种模式的核心思想是“读时填充缓存”。
+// 在读取数据时（GetNode）发现缓存未命中，然后从数据库加载并回填到缓存中。CreateNode 属于写操作
 func (r *neo4jNodeRepo) CreateNode(ctx context.Context, req *network.CreateNodeRequest) (*network.Node, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -73,24 +81,30 @@ func (r *neo4jNodeRepo) CreateNode(ctx context.Context, req *network.CreateNodeR
 	return mapDbNodeToThriftNode(dbNode, req.Type), nil
 }
 
-// GetNode 通过 ID 获取节点
+// GetNode 通过 ID 获取节点，应用 Read-Aside 缓存策略
 func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, error) {
-	/*
-		// 1. 尝试从缓存获取
-		if r.cache != nil {
-			cachedNode, err := r.cache.Get(ctx, id)
-			if err == nil && cachedNode != nil {
-				fmt.Printf("Repo: GetNode cache hit for id: %s\n", id)
-				return cachedNode, nil
-			}
-			if err != nil && !errors.Is(err, cache.ErrNotFound) {
-				// 记录缓存错误，但继续尝试从数据库获取
-				fmt.Printf("WARN: Repo: 缓存获取节点失败 (id: %s): %v\n", id, err)
-			}
-		}
-	*/
 
-	// 2. 从数据库获取
+	// 1. 尝试从缓存获取
+	if r.nodeCache != nil { // 检查缓存是否已配置
+		cachedNode, err := r.nodeCache.GetNode(ctx, id)
+		if err == nil {
+			// 缓存命中
+			fmt.Printf("Repo: GetNode cache hit for id: %s\n", id) // TODO: 使用日志库
+			return cachedNode, nil
+		} else if errors.Is(err, cache.ErrNilValue) {
+			// 缓存命中，但存的是空值 (表示 DB 中不存在)
+			fmt.Printf("Repo: GetNode cache hit with nil value for id: %s\n", id) // TODO: 使用日志库
+			return nil, err                                                       // 返回 cache.ErrNilValue 或 repo 层的 NotFound 错误
+		} else if !errors.Is(err, cache.ErrNotFound) {
+			// 缓存读取发生错误 (非 NotFound)
+			fmt.Printf("WARN: Repo: 缓存获取节点失败 (id: %s): %v\n", id, err) // TODO: 使用日志库
+			// 缓存出错，继续尝试从数据库获取，但要记录错误
+		}
+		// 如果是 cache.ErrNotFound，则继续执行数据库查询
+	}
+
+	// 2. 从数据库获取 (缓存未命中或缓存读取失败)
+	fmt.Printf("Repo: GetNode cache miss for id: %s, querying database...\n", id) // TODO: 使用日志库
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
@@ -98,8 +112,16 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 	if err != nil {
 		// 处理 DAL 返回的特定错误，例如未找到
 		if isNotFoundError(err) { // 使用辅助函数检查错误
-			return nil, err // 直接透传 Not Found 错误
+			// 数据库未找到，尝试缓存空值
+			if r.nodeCache != nil {
+				setErr := r.nodeCache.SetNode(ctx, id, nil, cache.NilValueTTL) // 缓存空值
+				if setErr != nil {
+					fmt.Printf("WARN: Repo: 缓存设置空值节点失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
+				}
+			}
+			return nil, err // 直接透传 DB 的 Not Found 错误
 		}
+		// 其他数据库错误
 		return nil, fmt.Errorf("repo: 调用 DAL 获取节点失败: %w", err)
 	}
 
@@ -107,26 +129,26 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 	nodeType, ok := labelToNodeType(labels) // 使用辅助函数推断类型
 	if !ok {
 		// 如果无法从标签推断出已知的 NodeType，记录警告或返回错误
-		fmt.Printf("WARN: Repo: 无法识别节点 (id: %s) 的标签: %v\n", id, labels)
+		fmt.Printf("WARN: Repo: 无法识别节点 (id: %s) 的标签: %v\n", id, labels) // TODO: 使用日志库
 		// 决定如何处理：返回错误、使用默认值、或尝试其他逻辑
 		return nil, fmt.Errorf("repo: 无法识别的节点类型标签 %v", labels)
 	}
 	resultNode := mapDbNodeToThriftNode(dbNode, nodeType) // 使用辅助函数映射
 
-	/*
-		// 4. 存入缓存 (如果需要且获取成功)
-		if r.cache != nil && resultNode != nil {
-			setErr := r.cache.Set(ctx, id, resultNode, time.Hour) // 假设缓存1小时
-			if setErr != nil {
-				fmt.Printf("WARN: Repo: 缓存设置节点失败 (id: %s): %v\n", id, setErr)
-			}
+	// 4. 存入缓存 (数据库获取成功)
+	// 读旁路模式的操作
+	if r.nodeCache != nil && resultNode != nil { // 确保有缓存实例且节点非空
+		setErr := r.nodeCache.SetNode(ctx, id, resultNode, defaultNodeTTL) // 使用默认 TTL
+		if setErr != nil {
+			// 缓存设置失败通常不应阻塞主流程，记录警告即可
+			fmt.Printf("WARN: Repo: 缓存设置节点失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
 		}
-	*/
+	}
 
 	return resultNode, nil
 }
 
-// UpdateNode 更新节点属性
+// UpdateNode 更新节点属性，应用 Write Invalidation 缓存策略
 func (r *neo4jNodeRepo) UpdateNode(ctx context.Context, req *network.UpdateNodeRequest) (*network.Node, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -167,25 +189,24 @@ func (r *neo4jNodeRepo) UpdateNode(ctx context.Context, req *network.UpdateNodeR
 	// 3. 映射结果
 	nodeType, ok := labelToNodeType(labels)
 	if !ok {
-		fmt.Printf("WARN: Repo: 更新后无法识别节点 (id: %s) 的标签: %v\n", req.ID, labels)
+		fmt.Printf("WARN: Repo: 更新后无法识别节点 (id: %s) 的标签: %v\n", req.ID, labels) // TODO: 使用日志库
 		return nil, fmt.Errorf("repo: 更新后无法识别的节点类型标签 %v", labels)
 	}
 	updatedNode := mapDbNodeToThriftNode(dbNode, nodeType)
 
-	/*
-		// 4. 使缓存失效
-		if r.cache != nil {
-			delErr := r.cache.Delete(ctx, req.ID)
-			if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) {
-				fmt.Printf("WARN: Repo: 缓存删除节点失败 (id: %s): %v\n", req.ID, delErr)
-			}
+	// 4. 使缓存失效 (数据库操作成功后)
+	if r.nodeCache != nil { // 检查缓存是否已配置
+		delErr := r.nodeCache.DeleteNode(ctx, req.ID)
+		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) { // 忽略 NotFound 错误
+			// 删除缓存失败通常记录警告
+			fmt.Printf("WARN: Repo: 缓存删除节点失败 (id: %s): %v\n", req.ID, delErr) // TODO: 使用日志库
 		}
-	*/
+	}
 
 	return updatedNode, nil
 }
 
-// DeleteNode 删除节点
+// DeleteNode 删除节点，应用 Write Invalidation 缓存策略
 func (r *neo4jNodeRepo) DeleteNode(ctx context.Context, id string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -194,25 +215,33 @@ func (r *neo4jNodeRepo) DeleteNode(ctx context.Context, id string) error {
 	err := r.nodeDAL.ExecDeleteNode(ctx, session, id)
 	if err != nil {
 		if isNotFoundError(err) { // 使用辅助函数检查错误
-			return err // 透传 Not Found
+			// 如果 DB 中本来就不存在，对应的缓存也应该删除（或已过期）
+			// 所以即使是 NotFound，我们仍然尝试删除缓存
+		} else {
+			// 其他数据库错误
+			return fmt.Errorf("repo: 调用 DAL 删除节点失败: %w", err)
 		}
-		return fmt.Errorf("repo: 调用 DAL 删除节点失败: %w", err)
 	}
 
-	/*
-		// 2. 使缓存失效
-		if r.cache != nil {
-			delErr := r.cache.Delete(ctx, id)
-			if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) {
-				fmt.Printf("WARN: Repo: 缓存删除节点失败 (id: %s): %v\n", id, delErr)
-			}
+	// 2. 使缓存失效 (无论 DB 操作是否 NotFound，都尝试删除)
+	if r.nodeCache != nil { // 检查缓存是否已配置
+		delErr := r.nodeCache.DeleteNode(ctx, id)
+		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) { // 忽略 NotFound 错误
+			// 删除缓存失败通常记录警告
+			fmt.Printf("WARN: Repo: 缓存删除节点失败 (id: %s): %v\n", id, delErr) // TODO: 使用日志库
 		}
-	*/
+	}
 
-	return nil
+	// 如果原始错误是 NotFound，则透传它
+	if isNotFoundError(err) {
+		return err
+	}
+
+	return nil // DB 删除成功（或本来就不存在）且尝试删除缓存后返回 nil
 }
 
 // SearchNodes 搜索节点
+// TODO: 考虑缓存搜索结果。这比较复杂，key 需要包含所有搜索参数，并且失效策略需要更精细。
 func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNodesRequest) ([]*network.Node, int32, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -252,8 +281,8 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 		nodeType, ok := labelToNodeType(labels)
 		if !ok {
 			nodeID := getStringProp(dbNode.Props, "id", "[未知ID]")
-			fmt.Printf("WARN: Repo: 搜索结果中无法识别节点 (id: %s) 的标签: %v\n", nodeID, labels)
-			continue // 跳过无法识别类型的节点
+			fmt.Printf("WARN: Repo: 搜索结果中无法识别节点 (id: %s) 的标签: %v\n", nodeID, labels) // TODO: 使用日志库
+			continue                                                                 // 跳过无法识别类型的节点
 		}
 		thriftNode := mapDbNodeToThriftNode(dbNode, nodeType)
 		if thriftNode != nil {
@@ -265,6 +294,7 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 }
 
 // GetNetwork 获取网络图谱 (节点和关系)
+// TODO: 考虑缓存网络图谱结果。Key 生成和失效策略复杂。
 func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkRequest) ([]*network.Node, []*network.Relation, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -330,12 +360,11 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 		}
 	}
 
-	// TODO: 考虑是否缓存 GetNetwork 的结果
-
 	return resultNodes, resultRelations, nil
 }
 
 // GetPath 获取两个节点之间的最短路径
+// TODO: 考虑缓存路径查询结果。Key 生成和失效策略复杂。
 func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest) ([]*network.Node, []*network.Relation, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -362,6 +391,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 	dbNodes, dbRelations, err := r.nodeDAL.ExecGetPath(ctx, session, req.SourceID, req.TargetID, maxDepth, relationTypesStr)
 	if err != nil {
 		if isNotFoundError(err) { // 路径未找到也可能报 not found
+			// 路径未找到时，不缓存空值（路径查询的缓存通常意义不大或过于复杂）
 			return nil, nil, err // 透传路径未找到
 		}
 		return nil, nil, fmt.Errorf("repo: 调用 DAL 获取路径失败: %w", err)
@@ -373,7 +403,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 	for i, dbNode := range dbNodes {
 		nodeType, ok := labelToNodeType(dbNode.Labels)
 		if !ok {
-			fmt.Printf("WARN: Repo: GetPath 中无法识别节点 (elementId: %s) 的标签: %v\n", dbNode.ElementId, dbNode.Labels)
+			fmt.Printf("WARN: Repo: GetPath 中无法识别节点 (elementId: %s) 的标签: %v\n", dbNode.ElementId, dbNode.Labels) // TODO: 使用日志库
 			return nil, nil, fmt.Errorf("repo: 路径中节点类型未知 (%v)", dbNode.Labels)
 		}
 		thriftNode := mapDbNodeToThriftNode(dbNode, nodeType)
@@ -390,13 +420,13 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 		sourceNode, sourceExists := nodesMap[dbRel.StartId]
 		targetNode, targetExists := nodesMap[dbRel.EndId]
 		if !sourceExists || !targetExists {
-			fmt.Printf("ERROR: Repo: GetPath 中关系 (elementId: %s) 的源或目标节点查找失败 (StartId: %d, EndId: %d)\n", dbRel.ElementId, dbRel.StartId, dbRel.EndId)
+			fmt.Printf("ERROR: Repo: GetPath 中关系 (elementId: %s) 的源或目标节点查找失败 (StartId: %d, EndId: %d)\n", dbRel.ElementId, dbRel.StartId, dbRel.EndId) // TODO: 使用日志库
 			return nil, nil, fmt.Errorf("repo: 路径中关系端点查找失败")
 		}
 
 		relType, ok := stringToRelationType(dbRel.Type)
 		if !ok {
-			fmt.Printf("WARN: Repo: GetPath 中无法识别关系 (elementId: %s) 的类型: %s\n", dbRel.ElementId, dbRel.Type)
+			fmt.Printf("WARN: Repo: GetPath 中无法识别关系 (elementId: %s) 的类型: %s\n", dbRel.ElementId, dbRel.Type) // TODO: 使用日志库
 			return nil, nil, fmt.Errorf("repo: 路径中关系类型未知 (%s)", dbRel.Type)
 		}
 

@@ -2,6 +2,7 @@ package neo4jrepo
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -10,26 +11,32 @@ import (
 
 	"labelwall/biz/dal/neo4jdal"
 	network "labelwall/biz/model/relationship/network"
-	// TODO "labelwall/pkg/cache" // 缓存包（待实现）
+	"labelwall/pkg/cache" // 引入缓存包
+)
+
+const (
+	// 默认关系缓存时间
+	defaultRelationTTL = 30 * time.Minute // 关系可能不如节点稳定，TTL 短一些
 )
 
 // neo4jRelationRepo 实现了 RelationRepository 接口
 type neo4jRelationRepo struct {
-	driver      neo4j.DriverWithContext
-	relationDAL neo4jdal.RelationDAL
-	// cache       cache.RelationCache // 关系缓存接口（待实现）
+	driver        neo4j.DriverWithContext
+	relationDAL   neo4jdal.RelationDAL
+	relationCache cache.RelationCache // 添加关系缓存接口
 }
 
 // NewRelationRepository 创建一个新的 RelationRepository 实例
-func NewRelationRepository(driver neo4j.DriverWithContext, relationDAL neo4jdal.RelationDAL /*, cache cache.RelationCache*/) RelationRepository {
+func NewRelationRepository(driver neo4j.DriverWithContext, relationDAL neo4jdal.RelationDAL, relationCache cache.RelationCache) RelationRepository {
 	return &neo4jRelationRepo{
-		driver:      driver,
-		relationDAL: relationDAL,
-		// TODO cache:       cache,
+		driver:        driver,
+		relationDAL:   relationDAL,
+		relationCache: relationCache, // 存储缓存实例
 	}
 }
 
 // CreateRelation 创建一个新的关系
+// 通常不直接影响基于 ID 的缓存
 func (r *neo4jRelationRepo) CreateRelation(ctx context.Context, req *network.CreateRelationRequest) (*network.Relation, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -66,23 +73,27 @@ func (r *neo4jRelationRepo) CreateRelation(ctx context.Context, req *network.Cre
 	return mapDbRelationshipToThriftRelation(dbRel, req.Type, req.Source, req.Target), nil
 }
 
-// GetRelation 通过 ID 获取关系
+// GetRelation 通过 ID 获取关系，应用 Read-Aside 缓存策略
 func (r *neo4jRelationRepo) GetRelation(ctx context.Context, id string) (*network.Relation, error) {
-	/*
-		// 1. 尝试从缓存获取
-		if r.cache != nil {
-			cachedRel, err := r.cache.Get(ctx, id)
-			if err == nil && cachedRel != nil {
-				fmt.Printf("Repo: GetRelation cache hit for id: %s\n", id)
-				return cachedRel, nil
-			}
-			if err != nil && !errors.Is(err, cache.ErrNotFound) {
-				fmt.Printf("WARN: Repo: 缓存获取关系失败 (id: %s): %v\n", id, err)
-			}
+
+	// 1. 尝试从缓存获取
+	if r.relationCache != nil {
+		cachedRel, err := r.relationCache.GetRelation(ctx, id)
+		if err == nil {
+			fmt.Printf("Repo: GetRelation cache hit for id: %s\n", id) // TODO: 使用日志库
+			return cachedRel, nil
+		} else if errors.Is(err, cache.ErrNilValue) {
+			// 关系缓存了空值（如果启用的话）
+			fmt.Printf("Repo: GetRelation cache hit with nil value for id: %s\n", id) // TODO: 使用日志库
+			return nil, err                                                           // 返回 cache.ErrNilValue 或 repo 层的 NotFound 错误
+		} else if !errors.Is(err, cache.ErrNotFound) {
+			// 其他缓存错误
+			fmt.Printf("WARN: Repo: 缓存获取关系失败 (id: %s): %v\n", id, err) // TODO: 使用日志库
 		}
-	*/
+	}
 
 	// 2. 从数据库获取
+	fmt.Printf("Repo: GetRelation cache miss for id: %s, querying database...\n", id) // TODO: 使用日志库
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
@@ -90,6 +101,11 @@ func (r *neo4jRelationRepo) GetRelation(ctx context.Context, id string) (*networ
 	dbRel, relTypeStr, sourceID, targetID, err := r.relationDAL.ExecGetRelationByID(ctx, session, id)
 	if err != nil {
 		if isNotFoundError(err) {
+			// 关系在 DB 未找到，根据策略决定是否缓存空值
+			if r.relationCache != nil {
+				// SetRelation(ctx, id, nil, ...) // 如果要缓存空关系，在这里调用
+				// 当前 redis_cache 实现默认不缓存空关系，所以这里不调用 Set
+			}
 			return nil, err // 透传 Not Found
 		}
 		return nil, fmt.Errorf("repo: 调用 DAL 获取关系失败: %w", err)
@@ -98,25 +114,23 @@ func (r *neo4jRelationRepo) GetRelation(ctx context.Context, id string) (*networ
 	// 3. 映射结果
 	relType, ok := stringToRelationType(relTypeStr)
 	if !ok {
-		fmt.Printf("WARN: Repo: 无法识别关系 (id: %s) 的类型: %s\n", id, relTypeStr)
+		fmt.Printf("WARN: Repo: 无法识别关系 (id: %s) 的类型: %s\n", id, relTypeStr) // TODO: 使用日志库
 		return nil, fmt.Errorf("repo: 无法识别的关系类型 %s", relTypeStr)
 	}
 	resultRel := mapDbRelationshipToThriftRelation(dbRel, relType, sourceID, targetID)
 
-	/*
-		// 4. 存入缓存
-		if r.cache != nil && resultRel != nil {
-			setErr := r.cache.Set(ctx, id, resultRel, time.Hour)
-			if setErr != nil {
-				fmt.Printf("WARN: Repo: 缓存设置关系失败 (id: %s): %v\n", id, setErr)
-			}
+	// 4. 存入缓存
+	if r.relationCache != nil && resultRel != nil {
+		setErr := r.relationCache.SetRelation(ctx, id, resultRel, defaultRelationTTL)
+		if setErr != nil {
+			fmt.Printf("WARN: Repo: 缓存设置关系失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
 		}
-	*/
+	}
 
 	return resultRel, nil
 }
 
-// UpdateRelation 更新关系属性
+// UpdateRelation 更新关系属性，应用 Write Invalidation 缓存策略
 func (r *neo4jRelationRepo) UpdateRelation(ctx context.Context, req *network.UpdateRelationRequest) (*network.Relation, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -150,25 +164,23 @@ func (r *neo4jRelationRepo) UpdateRelation(ctx context.Context, req *network.Upd
 	// 3. 映射结果
 	relType, ok := stringToRelationType(relTypeStr)
 	if !ok {
-		fmt.Printf("WARN: Repo: 更新后无法识别关系 (id: %s) 的类型: %s\n", req.ID, relTypeStr)
+		fmt.Printf("WARN: Repo: 更新后无法识别关系 (id: %s) 的类型: %s\n", req.ID, relTypeStr) // TODO: 使用日志库
 		return nil, fmt.Errorf("repo: 更新后无法识别的关系类型 %s", relTypeStr)
 	}
 	updatedRel := mapDbRelationshipToThriftRelation(dbRel, relType, sourceID, targetID)
 
-	/*
-		// 4. 使缓存失效
-		if r.cache != nil {
-			delErr := r.cache.Delete(ctx, req.ID)
-			if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) {
-				fmt.Printf("WARN: Repo: 缓存删除关系失败 (id: %s): %v\n", req.ID, delErr)
-			}
+	// 4. 使缓存失效
+	if r.relationCache != nil {
+		delErr := r.relationCache.DeleteRelation(ctx, req.ID)
+		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) {
+			fmt.Printf("WARN: Repo: 缓存删除关系失败 (id: %s): %v\n", req.ID, delErr) // TODO: 使用日志库
 		}
-	*/
+	}
 
 	return updatedRel, nil
 }
 
-// DeleteRelation 删除关系
+// DeleteRelation 删除关系，应用 Write Invalidation 缓存策略
 func (r *neo4jRelationRepo) DeleteRelation(ctx context.Context, id string) error {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -177,25 +189,31 @@ func (r *neo4jRelationRepo) DeleteRelation(ctx context.Context, id string) error
 	err := r.relationDAL.ExecDeleteRelation(ctx, session, id)
 	if err != nil {
 		if isNotFoundError(err) {
-			return err // 透传 Not Found
+			// DB 中不存在，仍然尝试删除缓存
+		} else {
+			// 其他数据库错误
+			return fmt.Errorf("repo: 调用 DAL 删除关系失败: %w", err)
 		}
-		return fmt.Errorf("repo: 调用 DAL 删除关系失败: %w", err)
 	}
 
-	/*
-		// 2. 使缓存失效
-		if r.cache != nil {
-			delErr := r.cache.Delete(ctx, id)
-			if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) {
-				fmt.Printf("WARN: Repo: 缓存删除关系失败 (id: %s): %v\n", id, delErr)
-			}
+	// 2. 使缓存失效
+	if r.relationCache != nil {
+		delErr := r.relationCache.DeleteRelation(ctx, id)
+		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) {
+			fmt.Printf("WARN: Repo: 缓存删除关系失败 (id: %s): %v\n", id, delErr) // TODO: 使用日志库
 		}
-	*/
+	}
 
-	return nil
+	// 如果原始错误是 NotFound，则透传它
+	if isNotFoundError(err) {
+		return err
+	}
+
+	return nil // DB 删除成功（或本来就不存在）且尝试删除缓存后返回 nil
 }
 
 // GetNodeRelations 获取节点的关系列表
+// TODO: 考虑缓存节点关系列表。Key 生成和失效策略复杂。
 func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.GetNodeRelationsRequest) ([]*network.Relation, int32, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -247,8 +265,8 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 		relType, ok := stringToRelationType(relTypeStr)
 		if !ok {
 			relID := getStringProp(dbRel.Props, "id", "[未知ID]")
-			fmt.Printf("WARN: Repo: GetNodeRelations 中无法识别关系 (id: %s) 的类型: %s\n", relID, relTypeStr)
-			continue // 跳过无法识别类型的关系
+			fmt.Printf("WARN: Repo: GetNodeRelations 中无法识别关系 (id: %s) 的类型: %s\n", relID, relTypeStr) // TODO: 使用日志库
+			continue                                                                                 // 跳过无法识别类型的关系
 		}
 
 		thriftRelation := mapDbRelationshipToThriftRelation(dbRel, relType, sourceID, targetID)

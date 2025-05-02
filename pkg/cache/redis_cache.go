@@ -44,7 +44,6 @@ func NewRedisCache(client *redis.Client, prefix string) (*redisCache, error) { /
 // --- NodeCache 实现 ---
 
 func (r *redisCache) nodeKey(id string) string {
-	// 完成 TODO: 考虑添加 prefix
 	return fmt.Sprintf("%snode:%s", r.prefix, id) // 使用 prefix
 }
 
