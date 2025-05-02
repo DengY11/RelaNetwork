@@ -1,9 +1,13 @@
 package neo4jrepo
 
 import (
+	"bytes"
 	"context" // 用于错误处理
-	"errors"  // 用于缓存错误检查
-	"fmt"     // 用于错误检查
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
+	"errors" // 用于缓存错误检查
+	"fmt"    // 用于错误检查
 	"time"
 
 	"github.com/google/uuid"
@@ -17,27 +21,34 @@ import (
 const (
 	// 默认节点缓存时间
 	defaultNodeTTL = 1 * time.Hour
+
+	searchNodesCachePrefix = "search:nodes:ids:"
+	searchNodesCacheTTL    = 5 * time.Minute // 搜索结果缓存 5 分钟
+	// 空搜索结果标记及 TTL (较短，防止长时间缓存无效搜索)
+	searchEmptyPlaceholder = "__EMPTY_SEARCH__"
+	searchEmptyTTL         = 1 * time.Minute
 )
 
 // neo4jNodeRepo 实现了 NodeRepository 接口
 type neo4jNodeRepo struct {
-	driver    neo4j.DriverWithContext
-	nodeDAL   neo4jdal.NodeDAL
-	nodeCache cache.NodeCache // 添加节点缓存接口
+	driver  neo4j.DriverWithContext
+	nodeDAL neo4jdal.NodeDAL
+	// 使用组合后的缓存接口
+	cache cache.NodeAndByteCache
 }
 
 // NewNodeRepository 创建一个新的 NodeRepository 实例
-// 依赖注入 Neo4j 驱动、Node DAL 实现和 NodeCache 实现
-func NewNodeRepository(driver neo4j.DriverWithContext, nodeDAL neo4jdal.NodeDAL, nodeCache cache.NodeCache) NodeRepository {
+// 依赖注入 Neo4j 驱动、Node DAL 实现和组合缓存实现
+func NewNodeRepository(driver neo4j.DriverWithContext, nodeDAL neo4jdal.NodeDAL, cache cache.NodeAndByteCache) NodeRepository {
 	return &neo4jNodeRepo{
-		driver:    driver,
-		nodeDAL:   nodeDAL,
-		nodeCache: nodeCache, // 存储缓存实例
+		driver:  driver,
+		nodeDAL: nodeDAL,
+		cache:   cache, // 存储缓存实例
 	}
 }
 
 // CreateNode 在 Neo4j 中创建一个新节点
-// 读旁路 这种模式的核心思想是“读时填充缓存”。
+// 读旁路 这种模式的核心思想是"读时填充缓存"。
 // 在读取数据时（GetNode）发现缓存未命中，然后从数据库加载并回填到缓存中。CreateNode 属于写操作
 func (r *neo4jNodeRepo) CreateNode(ctx context.Context, req *network.CreateNodeRequest) (*network.Node, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
@@ -85,8 +96,8 @@ func (r *neo4jNodeRepo) CreateNode(ctx context.Context, req *network.CreateNodeR
 func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, error) {
 
 	// 1. 尝试从缓存获取
-	if r.nodeCache != nil { // 检查缓存是否已配置
-		cachedNode, err := r.nodeCache.GetNode(ctx, id)
+	if r.cache != nil { // 检查缓存是否已配置
+		cachedNode, err := r.cache.GetNode(ctx, id)
 		if err == nil {
 			// 缓存命中
 			fmt.Printf("Repo: GetNode cache hit for id: %s\n", id) // TODO: 使用日志库
@@ -113,8 +124,8 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 		// 处理 DAL 返回的特定错误，例如未找到
 		if isNotFoundError(err) { // 使用辅助函数检查错误
 			// 数据库未找到，尝试缓存空值
-			if r.nodeCache != nil {
-				setErr := r.nodeCache.SetNode(ctx, id, nil, cache.NilValueTTL) // 缓存空值
+			if r.cache != nil {
+				setErr := r.cache.SetNode(ctx, id, nil, cache.NilValueTTL) // 缓存空值
 				if setErr != nil {
 					fmt.Printf("WARN: Repo: 缓存设置空值节点失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
 				}
@@ -137,8 +148,8 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 
 	// 4. 存入缓存 (数据库获取成功)
 	// 读旁路模式的操作
-	if r.nodeCache != nil && resultNode != nil { // 确保有缓存实例且节点非空
-		setErr := r.nodeCache.SetNode(ctx, id, resultNode, defaultNodeTTL) // 使用默认 TTL
+	if r.cache != nil && resultNode != nil { // 确保有缓存实例且节点非空
+		setErr := r.cache.SetNode(ctx, id, resultNode, defaultNodeTTL) // 使用默认 TTL
 		if setErr != nil {
 			// 缓存设置失败通常不应阻塞主流程，记录警告即可
 			fmt.Printf("WARN: Repo: 缓存设置节点失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
@@ -195,8 +206,8 @@ func (r *neo4jNodeRepo) UpdateNode(ctx context.Context, req *network.UpdateNodeR
 	updatedNode := mapDbNodeToThriftNode(dbNode, nodeType)
 
 	// 4. 使缓存失效 (数据库操作成功后)
-	if r.nodeCache != nil { // 检查缓存是否已配置
-		delErr := r.nodeCache.DeleteNode(ctx, req.ID)
+	if r.cache != nil { // 检查缓存是否已配置
+		delErr := r.cache.DeleteNode(ctx, req.ID)
 		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) { // 忽略 NotFound 错误
 			// 删除缓存失败通常记录警告
 			fmt.Printf("WARN: Repo: 缓存删除节点失败 (id: %s): %v\n", req.ID, delErr) // TODO: 使用日志库
@@ -224,8 +235,8 @@ func (r *neo4jNodeRepo) DeleteNode(ctx context.Context, id string) error {
 	}
 
 	// 2. 使缓存失效 (无论 DB 操作是否 NotFound，都尝试删除)
-	if r.nodeCache != nil { // 检查缓存是否已配置
-		delErr := r.nodeCache.DeleteNode(ctx, id)
+	if r.cache != nil { // 检查缓存是否已配置
+		delErr := r.cache.DeleteNode(ctx, id)
 		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) { // 忽略 NotFound 错误
 			// 删除缓存失败通常记录警告
 			fmt.Printf("WARN: Repo: 缓存删除节点失败 (id: %s): %v\n", id, delErr) // TODO: 使用日志库
@@ -240,13 +251,142 @@ func (r *neo4jNodeRepo) DeleteNode(ctx context.Context, id string) error {
 	return nil // DB 删除成功（或本来就不存在）且尝试删除缓存后返回 nil
 }
 
-// SearchNodes 搜索节点
-// TODO: 考虑缓存搜索结果。这比较复杂，key 需要包含所有搜索参数，并且失效策略需要更精细。
+// searchNodesCacheValue 定义了搜索结果缓存的结构
+type searchNodesCacheValue struct {
+	NodeIDs []string `json:"node_ids"`
+	Total   int32    `json:"total"`
+}
+
+// generateSearchNodesCacheKey 生成搜索节点的缓存键
+func generateSearchNodesCacheKey(req *network.SearchNodesRequest) string {
+	// 使用 SHA1 哈希 Keyword 以避免过长或包含特殊字符的键
+	hasher := sha1.New()
+	hasher.Write([]byte(req.Keyword)) // Keyword 是 string 类型，可以直接写入
+	keywordHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// 处理可能为 nil 的 Limit 和 Offset
+	var limitVal, offsetVal int32
+	if req.Limit != nil {
+		limitVal = *req.Limit
+	}
+	if req.Offset != nil {
+		offsetVal = *req.Offset
+	}
+
+	// NodeType 也是必需的
+	nodeTypeStr := req.Type.String()
+
+	// 格式: prefix:keyword_hash:type:limit:offset
+	return fmt.Sprintf("%s%s:%s:%d:%d", searchNodesCachePrefix, keywordHash, nodeTypeStr, limitVal, offsetVal)
+}
+
+// SearchNodes 搜索节点 (带缓存)
 func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNodesRequest) ([]*network.Node, int32, error) {
+	// 0. 检查缓存是否可用
+	if r.cache == nil {
+		fmt.Println("WARN: Repo: Cache 未初始化，跳过 SearchNodes 缓存") // TODO: 使用日志库
+		return r.searchNodesDirect(ctx, req)
+	}
+
+	// 1. 生成缓存键
+	cacheKey := generateSearchNodesCacheKey(req)
+
+	// 2. 尝试从缓存获取 (使用通用的 Get)
+	cachedData, err := r.cache.Get(ctx, cacheKey)
+	if err == nil { // 缓存命中
+		// 2.0 检查是否是空结果标记
+		if bytes.Equal(cachedData, []byte(searchEmptyPlaceholder)) {
+			fmt.Printf("INFO: Repo: SearchNodes 缓存命中空标记 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+			return []*network.Node{}, 0, nil                                    // 返回空结果
+		}
+
+		// 2.1 尝试解析缓存的 ID 列表和总数
+		var cachedValue searchNodesCacheValue
+		if err := json.NewDecoder(bytes.NewReader(cachedData)).Decode(&cachedValue); err == nil {
+			// 2.1 缓存命中且解析成功
+			fmt.Printf("INFO: Repo: SearchNodes 缓存命中 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+			resultNodes := make([]*network.Node, 0, len(cachedValue.NodeIDs))
+			for _, nodeID := range cachedValue.NodeIDs {
+				// 2.2 使用 GetNode 获取节点详情 (GetNode 会处理自己的缓存)
+				node, getNodeErr := r.GetNode(ctx, nodeID) // 注意：这里可能需要处理 GetNode 返回的错误
+				if getNodeErr != nil {
+					// 如果节点未找到（可能在缓存结果生成后被删除），可以选择跳过或记录日志
+					if errors.Is(getNodeErr, cache.ErrNotFound) || isNotFoundError(getNodeErr) {
+						fmt.Printf("WARN: Repo: SearchNodes 缓存命中，但 GetNode 未找到节点 %s (可能已被删除)\n", nodeID) // TODO: 使用日志库
+						continue
+					}
+					// 其他 GetNode 错误，可能需要中断或返回错误
+					fmt.Printf("ERROR: Repo: SearchNodes 缓存命中，但 GetNode 失败 (ID: %s): %v\n", nodeID, getNodeErr) // TODO: 使用日志库
+					// 暂定策略：跳过此节点，继续处理其他节点
+					continue
+				}
+				if node != nil { // 确保 GetNode 返回了有效的节点
+					resultNodes = append(resultNodes, node)
+				}
+			}
+			return resultNodes, cachedValue.Total, nil
+		}
+		// 缓存数据解析失败，当作缓存未命中处理
+		fmt.Printf("ERROR: Repo: SearchNodes 缓存数据解析失败 (Key: %s): %v\n", cacheKey, err) // TODO: 使用日志库
+	} else if !errors.Is(err, cache.ErrNotFound) {
+		// 非 "Not Found" 的缓存读取错误，记录日志但继续执行数据库查询
+		fmt.Printf("ERROR: Repo: SearchNodes 缓存读取失败 (Key: %s): %v\n", cacheKey, err) // TODO: 使用日志库
+	} else {
+		// 缓存未命中 (cache.ErrNotFound)
+		fmt.Printf("INFO: Repo: SearchNodes 缓存未命中 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+	}
+
+	// 3. 缓存未命中或出错，直接查询数据库
+	resultNodes, total, err := r.searchNodesDirect(ctx, req)
+	if err != nil {
+		return nil, 0, err // 直接返回数据库查询错误
+	}
+
+	// 4. 缓存结果 (如果查询成功且有结果)
+	if err == nil && len(resultNodes) > 0 {
+		nodeIDs := make([]string, len(resultNodes))
+		for i, node := range resultNodes {
+			nodeIDs[i] = node.ID
+		}
+
+		cacheValue := searchNodesCacheValue{
+			NodeIDs: nodeIDs,
+			Total:   total,
+		}
+
+		var buffer bytes.Buffer
+		if err := json.NewEncoder(&buffer).Encode(cacheValue); err == nil {
+			// 设置缓存，忽略 Set 的错误 (只记录日志)
+			// 使用通用的 Set
+			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), searchNodesCacheTTL)
+			if setErr != nil {
+				fmt.Printf("ERROR: Repo: SearchNodes 缓存写入失败 (Key: %s): %v\n", cacheKey, setErr) // TODO: 使用日志库
+			} else {
+				fmt.Printf("INFO: Repo: SearchNodes 结果已写入缓存 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+			}
+		} else {
+			fmt.Printf("ERROR: Repo: SearchNodes 缓存值序列化失败 (Key: %s): %v\n", cacheKey, err) // TODO: 使用日志库
+		}
+	} else if err == nil && len(resultNodes) == 0 {
+		// 4.1 缓存空结果标记
+		setErr := r.cache.Set(ctx, cacheKey, []byte(searchEmptyPlaceholder), searchEmptyTTL)
+		if setErr != nil {
+			fmt.Printf("ERROR: Repo: SearchNodes 缓存空标记写入失败 (Key: %s): %v\n", cacheKey, setErr) // TODO: 使用日志库
+		} else {
+			fmt.Printf("INFO: Repo: SearchNodes 空结果已写入缓存标记 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+		}
+	}
+
+	// 5. 返回从数据库获取的结果
+	return resultNodes, total, nil
+}
+
+// searchNodesDirect 是实际执行数据库查询的逻辑 (从原 SearchNodes 提取)
+func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.SearchNodesRequest) ([]*network.Node, int32, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// 1. 构建 DAL 查询条件
+	// 构建 DAL 查询条件
 	criteria := make(map[string]string)
 	if req.Keyword != "" { // Keyword 是 string 类型
 		// 假设按 name 模糊搜索，DAL 层会处理 CONTAINS 逻辑
@@ -255,7 +395,7 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 	// 如果 SearchNodesRequest 中添加了 Properties 字段，则在此处处理
 	// if req.Properties != nil { ... }
 
-	// 处理分页参数，需要从 *int32 转换为 int64
+	// 处理分页参数
 	var limit, offset int64
 	if req.Limit != nil {
 		limit = int64(*req.Limit)
@@ -268,13 +408,14 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 		offset = 0 // 默认偏移
 	}
 
-	// 2. 调用 DAL 层执行搜索
+	// 调用 DAL 层执行搜索
 	dbNodes, labelsList, total, err := r.nodeDAL.ExecSearchNodes(ctx, session, criteria, req.Type, limit, offset)
 	if err != nil {
+		// 注意：这里不需要检查 isNotFoundError，因为搜索本身找不到是正常情况，DAL应返回空列表和0 total
 		return nil, 0, fmt.Errorf("repo: 调用 DAL 搜索节点失败: %w", err)
 	}
 
-	// 3. 映射结果
+	// 映射结果
 	resultNodes := make([]*network.Node, 0, len(dbNodes))
 	for i, dbNode := range dbNodes {
 		labels := labelsList[i]
@@ -282,7 +423,7 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 		if !ok {
 			nodeID := getStringProp(dbNode.Props, "id", "[未知ID]")
 			fmt.Printf("WARN: Repo: 搜索结果中无法识别节点 (id: %s) 的标签: %v\n", nodeID, labels) // TODO: 使用日志库
-			continue                                                                 // 跳过无法识别类型的节点
+			continue
 		}
 		thriftNode := mapDbNodeToThriftNode(dbNode, nodeType)
 		if thriftNode != nil {

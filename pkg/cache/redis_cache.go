@@ -187,6 +187,45 @@ func (r *redisCache) DeleteRelation(ctx context.Context, id string) error {
 	return nil
 }
 
+// --- 通用 Cache[[]byte] 实现 ---
+
+// Get 实现通用 Cache[[]byte] 的 Get 方法
+// 注意：这个通用 Get 不处理 NilValuePlaceholder，直接返回获取到的字节。
+// 调用方需要自己处理 ErrNotFound。
+func (r *redisCache) Get(ctx context.Context, key string) ([]byte, error) {
+	// 通用 Get 不自动添加 prefix，调用方需确保 key 包含所需前缀
+	val, err := r.client.Get(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, ErrNotFound // Key 不存在，返回标准错误
+	} else if err != nil {
+		return nil, fmt.Errorf("cache: generic redis get failed for key %s: %w", key, err)
+	}
+	return []byte(val), nil
+}
+
+// Set 实现通用 Cache[[]byte] 的 Set 方法
+// 注意：这个通用 Set 不处理 NilValuePlaceholder，直接设置传入的字节。
+// 调用方需要自己处理空值缓存（如果需要）。
+func (r *redisCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	// 通用 Set 不自动添加 prefix
+	finalTTL := addJitter(ttl) // 应用 TTL Jitter
+	err := r.client.Set(ctx, key, value, finalTTL).Err()
+	if err != nil {
+		return fmt.Errorf("cache: generic redis set failed for key %s: %w", key, err)
+	}
+	return nil
+}
+
+// Delete 实现通用 Cache[[]byte] 的 Delete 方法
+func (r *redisCache) Delete(ctx context.Context, key string) error {
+	// 通用 Delete 不自动添加 prefix
+	err := r.client.Del(ctx, key).Err()
+	if err != nil {
+		return fmt.Errorf("cache: generic redis del failed for key %s: %w", key, err)
+	}
+	return nil
+}
+
 // --- 辅助函数 ---
 
 // addJitter 为 TTL 增加随机偏移，防止缓存雪崩
@@ -201,3 +240,6 @@ func addJitter(baseTTL time.Duration) time.Duration {
 // 确保 redisCache 同时实现了 NodeCache 和 RelationCache 接口
 var _ NodeCache = (*redisCache)(nil)
 var _ RelationCache = (*redisCache)(nil)
+
+// 确保 redisCache 实现了新的组合接口
+var _ NodeAndByteCache = (*redisCache)(nil)

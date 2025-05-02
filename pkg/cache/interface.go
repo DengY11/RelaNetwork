@@ -55,3 +55,9 @@ type Cache[T any] interface {
 	// Delete 从缓存中删除指定的 key。
 	Delete(ctx context.Context, key string) error
 }
+
+// NodeAndByteCache 组合了节点特定缓存和通用字节缓存的功能
+type NodeAndByteCache interface {
+	NodeCache
+	Cache[[]byte] // 嵌入通用字节缓存接口
+}
