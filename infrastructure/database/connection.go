@@ -8,6 +8,13 @@ type Neo4jConfig struct {
 	Password string `mapstructure:"password"`
 }
 
-// 这里可以添加更多连接管理的逻辑，例如：
-// - 获取单例驱动实例
-// - 管理连接池状态等
+// RedisConfig 保存 Redis 连接所需的配置信息
+type RedisConfig struct {
+	Addr     string // 例如 "localhost:6379"
+	Password string // 如果没有密码则为空
+	DB       int    // 例如 0
+}
+
+//
+// TODO 获取单例驱动实例
+// TODO 管理连接池状态等
