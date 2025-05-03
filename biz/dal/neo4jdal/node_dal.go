@@ -260,7 +260,7 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 
 	readResult, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		var queryBuilder strings.Builder // 用于构建查询语句
-		params := map[string]any{ // 初始化查询参数
+		params := map[string]any{        // 初始化查询参数
 			"limit":  limit,
 			"offset": offset,
 		}
@@ -361,6 +361,7 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 // ExecGetNetwork 执行网络查询的 Cypher。
 // 根据职业和深度查询相关节点和关系。
 // TODO：此查询可能返回大量数据，建议在调用层或 API 设计中加入限制。
+// TODO: config文件应该包含depth配置
 func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.SessionWithContext, profession string, depth int32, limit, offset int64) ([]neo4j.Node, []neo4j.Relationship, error) {
 	var nodes []neo4j.Node
 	var relationships []neo4j.Relationship
@@ -465,6 +466,7 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 
 // ExecGetPath 执行路径查询的 Cypher。
 // 查找两个节点之间的路径，可指定最大深度和关系类型。
+// TODO: config 文件应该包含depth设置
 func (d *neo4jNodeDAL) ExecGetPath(ctx context.Context, session neo4j.SessionWithContext, sourceID, targetID string, maxDepth int32, relTypes []string) ([]neo4j.Node, []neo4j.Relationship, error) {
 	var nodes []neo4j.Node
 	var relationships []neo4j.Relationship

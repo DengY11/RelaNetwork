@@ -1,6 +1,7 @@
 package cache
 
 //TODO: 使用日志库
+//TODO: 使用布隆过滤器
 
 import (
 	"context"
@@ -20,7 +21,7 @@ const (
 	NilValuePlaceholder = "__NIL_VALUE__"
 	// NilValueTTL 设置空值的较短 TTL，防止长时间缓存不存在的数据。
 	NilValueTTL = 5 * time.Minute
-	// DefaultTTL Jitter 百分比，例如 0.1 表示在基础 TTL 上增加 0% 到 10% 的随机时间。
+	// DefaultTTLJitterPercent DefaultTTL Jitter 百分比，例如 0.1 表示在基础 TTL 上增加 0% 到 10% 的随机时间。
 	DefaultTTLJitterPercent = 0.1
 )
 

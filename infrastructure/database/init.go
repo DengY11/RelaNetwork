@@ -1,9 +1,12 @@
 package database
 
+//TODO: 使用更专业的日志库
+//TODO: 从配置文件中读取redis和neo4j的配置
+
 import (
 	"context"
 	"fmt"
-	"log" // 建议使用更专业的日志库
+	"log"
 	"strings"
 	"time"
 

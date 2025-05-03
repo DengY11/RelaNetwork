@@ -69,8 +69,9 @@ func NewNodeRepository(
 }
 
 // CreateNode 在 Neo4j 中创建一个新节点
-// 读旁路 这种模式的核心思想是"读时填充缓存"。
+// 读旁路Read Aside 这种模式的核心思想是"读时填充缓存"。
 // 在读取数据时（GetNode）发现缓存未命中，然后从数据库加载并回填到缓存中。CreateNode 属于写操作
+// 所以createNode操作就不用处理缓存了
 func (r *neo4jNodeRepo) CreateNode(ctx context.Context, req *network.CreateNodeRequest) (*network.Node, error) {
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
@@ -212,7 +213,7 @@ func (r *neo4jNodeRepo) UpdateNode(ctx context.Context, req *network.UpdateNodeR
 	// 2. 调用 DAL 层执行更新
 	dbNode, labels, err := r.nodeDAL.ExecUpdateNode(ctx, session, req.ID, updates)
 	if err != nil {
-		if isNotFoundError(err) { // 使用辅助函数检查错误
+		if isNotFoundError(err) {
 			return nil, err // 透传 Not Found
 		}
 		return nil, fmt.Errorf("repo: 调用 DAL 更新节点失败: %w", err)
@@ -246,7 +247,7 @@ func (r *neo4jNodeRepo) DeleteNode(ctx context.Context, id string) error {
 	// 1. 调用 DAL 层执行删除
 	err := r.nodeDAL.ExecDeleteNode(ctx, session, id)
 	if err != nil {
-		if isNotFoundError(err) { // 使用辅助函数检查错误
+		if isNotFoundError(err) {
 			// 如果 DB 中本来就不存在，对应的缓存也应该删除（或已过期）
 			// 所以即使是 NotFound，我们仍然尝试删除缓存
 		} else {
@@ -312,7 +313,7 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 	// 1. 生成缓存键
 	cacheKey := generateSearchNodesCacheKey(req)
 
-	// 2. 尝试从缓存获取 (使用通用的 Get)
+	// 2. 尝试从缓存获取
 	cachedData, err := r.cache.Get(ctx, cacheKey)
 	if err == nil { // 缓存命中
 		// 2.0 检查是否是空结果标记
@@ -421,7 +422,7 @@ func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.Sear
 	if req.Limit != nil {
 		limit = int64(*req.Limit)
 	} else {
-		limit = 10 // 默认分页大小
+		limit = 10 // TODO:从config文件中读取limit
 	}
 	if req.Offset != nil {
 		offset = int64(*req.Offset)
@@ -470,6 +471,7 @@ func generateGetNetworkCacheKey(req *network.GetNetworkRequest, maxDepth int32, 
 }
 
 // GetNetwork 获取网络图谱 (节点和关系)，带缓存
+// TODO: 从config文件中读取maxDepth
 func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkRequest) ([]*network.Node, []*network.Relation, error) {
 	// 1. 处理参数和计算默认值 (与缓存键生成相关)
 	var maxDepth int32 = 1 // 默认深度
@@ -701,6 +703,7 @@ func generateGetPathCacheKey(req *network.GetPathRequest, maxDepth int32, relati
 }
 
 // GetPath 获取两个节点之间的最短路径 (带缓存)
+// TODO:从config文件中读取maxDepth
 func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest) ([]*network.Node, []*network.Relation, error) {
 	// 1. 处理参数 (与缓存键生成相关)
 	var maxDepth int32 = 3
