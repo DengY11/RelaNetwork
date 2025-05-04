@@ -99,7 +99,8 @@ func TestMain(m *testing.M) {
 		panic("Failed to connect to Redis: " + err.Error())
 	}
 	// Instantiate your Redis cache implementation using the correct constructor
-	testCacheImpl, err := cache.NewRedisCache(redisClient, "testprefix:") // Use correct constructor and add a test prefix
+	// Provide estimatedKeys (e.g., 10000) and fpRate (e.g., 0.01) for the Bloom filter.
+	testCacheImpl, err := cache.NewRedisCache(redisClient, "testprefix:", 10000, 0.01) // Use correct constructor and add a test prefix
 	if err != nil {
 		testDriver.Close(context.Background())
 		redisClient.Close()

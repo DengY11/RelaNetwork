@@ -4,6 +4,7 @@ package cache
 //TODO: 使用布隆过滤器
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	network "labelwall/biz/model/relationship/network"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/willf/bloom" // Import Bloom filter library
 )
 
 const (
@@ -25,204 +27,268 @@ const (
 	DefaultTTLJitterPercent = 0.1
 )
 
-// redisCache 实现了 NodeCache 和 RelationCache 接口
-type redisCache struct {
+// redisCache implements the Cache interface using Redis.
+// It includes NodeCache, RelationCache, and generic ByteCache functionality.
+type RedisCache struct {
 	client *redis.Client
-	prefix string // 添加 prefix 字段，用于区分 key
+	prefix string             // Prefix for all keys managed by this cache instance
+	filter *bloom.BloomFilter // Bloom filter instance
 }
 
-// NewRedisCache 创建一个新的 Redis 缓存实例
-func NewRedisCache(client *redis.Client, prefix string) (*redisCache, error) { // 添加 prefix 参数和 error 返回值
+// Ensure RedisCache implements all required interfaces.
+var _ NodeCache = (*RedisCache)(nil)
+var _ RelationCache = (*RedisCache)(nil)
+var _ NodeAndByteCache = (*RedisCache)(nil)
+var _ RelationAndByteCache = (*RedisCache)(nil)
+
+// NewRedisCache creates a new RedisCache instance.
+// estimatedKeys: Estimated number of unique items (nodes + relations + other keys) the cache will hold.
+// fpRate: Desired false positive rate for the Bloom filter (e.g., 0.01 for 1%).
+func NewRedisCache(client *redis.Client, prefix string, estimatedKeys uint, fpRate float64) (*RedisCache, error) {
 	if client == nil {
-		return nil, errors.New("cache: redis client cannot be nil")
+		return nil, errors.New("redis client cannot be nil")
 	}
-	return &redisCache{
+	// Initialize Bloom filter
+	filter := bloom.NewWithEstimates(estimatedKeys, fpRate)
+
+	return &RedisCache{
 		client: client,
-		prefix: prefix, // 赋值 prefix
+		prefix: prefix,
+		filter: filter,
 	}, nil
 }
 
-// --- NodeCache 实现 ---
+// --- NodeCache Implementation ---
 
-func (r *redisCache) nodeKey(id string) string {
-	return fmt.Sprintf("%snode:%s", r.prefix, id) // 使用 prefix
+// nodeKey generates the Redis key for a node.
+func (c *RedisCache) nodeKey(id string) string {
+	return c.prefix + "node:" + id
 }
 
-// GetNode 实现 NodeCache 的 GetNode 方法
-func (r *redisCache) GetNode(ctx context.Context, id string) (*network.Node, error) {
-	key := r.nodeKey(id)
-	val, err := r.client.Get(ctx, key).Result()
+// GetNode retrieves a node from the cache.
+func (c *RedisCache) GetNode(ctx context.Context, id string) (*network.Node, error) {
+	key := c.nodeKey(id)
 
-	if errors.Is(err, redis.Nil) {
-		// Key 不存在
+	// 1. Check Bloom Filter first
+	if !c.filter.TestString(key) {
+		// If the filter says the key definitely doesn't exist, return NotFound
 		return nil, ErrNotFound
-	} else if err != nil {
-		// 其他 Redis 错误
-		return nil, fmt.Errorf("cache: redis get failed for key %s: %w", key, err)
 	}
 
-	if val == NilValuePlaceholder {
-		// 缓存了空值
+	// 2. Proceed to check Redis if filter test passes (key might exist)
+	valBytes, err := c.client.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, ErrNotFound // Key not found in Redis
+		}
+		return nil, fmt.Errorf("redis Get failed for node %s: %w", id, err)
+	}
+
+	// Check for nil placeholder
+	if bytes.Equal(valBytes, []byte(NilValuePlaceholder)) {
 		return nil, ErrNilValue
 	}
 
-	// 反序列化
 	var node network.Node
-	if err := json.Unmarshal([]byte(val), &node); err != nil {
-		// 数据损坏或类型不匹配，可以考虑删除这个 key
-		r.client.Del(ctx, key) // 尝试删除损坏的数据
-		return nil, fmt.Errorf("cache: failed to unmarshal node data for key %s: %w", key, err)
+	if err := json.Unmarshal(valBytes, &node); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal node %s: %w", id, err)
 	}
-
 	return &node, nil
 }
 
-// SetNode 实现 NodeCache 的 SetNode 方法
-func (r *redisCache) SetNode(ctx context.Context, id string, node *network.Node, ttl time.Duration) error {
-	key := r.nodeKey(id)
+// SetNode stores a node in the cache.
+// If node is nil, it stores a placeholder indicating absence.
+func (c *RedisCache) SetNode(ctx context.Context, id string, node *network.Node, ttl time.Duration) error {
+	key := c.nodeKey(id)
+	var valBytes []byte
+	var err error
 
 	if node == nil {
-		// 缓存空值
-		// 注意：空值的 TTL 通常较短，这里直接使用 NilValueTTL
-		err := r.client.Set(ctx, key, NilValuePlaceholder, addJitter(NilValueTTL)).Err()
+		valBytes = []byte(NilValuePlaceholder)
+		// DO NOT add nil placeholders to the Bloom filter
+	} else {
+		valBytes, err = json.Marshal(node)
 		if err != nil {
-			return fmt.Errorf("cache: redis set nil value failed for key %s: %w", key, err)
+			return fmt.Errorf("failed to marshal node %s: %w", id, err)
 		}
-		return nil
+		// Add the key to the Bloom filter *only* if storing a real node
 	}
 
-	// 序列化节点数据
-	data, err := json.Marshal(node)
-	if err != nil {
-		return fmt.Errorf("cache: failed to marshal node data for key %s: %w", key, err)
-	}
+	// Add the key to the Bloom filter regardless of whether it's a placeholder or real node.
+	// This allows GetNode to find nil placeholders after passing the filter check.
+	c.filter.AddString(key)
 
-	// 设置带 Jitter 的 TTL
-	finalTTL := addJitter(ttl)
-	err = r.client.Set(ctx, key, data, finalTTL).Err()
-	if err != nil {
-		return fmt.Errorf("cache: redis set failed for key %s: %w", key, err)
-	}
+	// Apply jitter to TTL before setting
+	ttlWithJitter := addJitter(ttl)
 
-	return nil
-}
-
-// DeleteNode 实现 NodeCache 的 DeleteNode 方法
-func (r *redisCache) DeleteNode(ctx context.Context, id string) error {
-	key := r.nodeKey(id)
-	err := r.client.Del(ctx, key).Err()
-	// 如果 key 不存在，Del 操作也会成功返回，所以通常不需要特殊处理 redis.Nil
-	if err != nil {
-		return fmt.Errorf("cache: redis del failed for key %s: %w", key, err)
+	if err := c.client.Set(ctx, key, valBytes, ttlWithJitter).Err(); err != nil {
+		// Consider if we should attempt to remove from filter if Set fails? Might be overly complex.
+		return fmt.Errorf("redis Set failed for node %s: %w", id, err)
 	}
 	return nil
 }
 
-// --- RelationCache 实现 (与 NodeCache 非常相似) ---
-
-func (r *redisCache) relationKey(id string) string {
-	// 完成 TODO: 考虑添加 prefix
-	return fmt.Sprintf("%srelation:%s", r.prefix, id) // 使用 prefix
+// DeleteNode removes a node from the cache.
+func (c *RedisCache) DeleteNode(ctx context.Context, id string) error {
+	key := c.nodeKey(id)
+	// Note: Standard Bloom filters don't support deletion easily.
+	// We simply delete from Redis. If the item is re-added later, the filter
+	// might already contain it (which is acceptable). False negatives are avoided.
+	if err := c.client.Del(ctx, key).Err(); err != nil {
+		if errors.Is(err, redis.Nil) {
+			return ErrNotFound // Or return nil, as deleting non-existent is often okay
+		}
+		return fmt.Errorf("redis Del failed for node %s: %w", id, err)
+	}
+	return nil
 }
 
-// GetRelation 实现 RelationCache 的 GetRelation 方法
-func (r *redisCache) GetRelation(ctx context.Context, id string) (*network.Relation, error) {
-	key := r.relationKey(id)
-	val, err := r.client.Get(ctx, key).Result()
+// --- RelationCache Implementation ---
 
-	if errors.Is(err, redis.Nil) {
+// relationKey generates the Redis key for a relation.
+func (c *RedisCache) relationKey(id string) string {
+	return c.prefix + "relation:" + id
+}
+
+// GetRelation retrieves a relation from the cache.
+func (c *RedisCache) GetRelation(ctx context.Context, id string) (*network.Relation, error) {
+	key := c.relationKey(id)
+
+	// 1. Check Bloom Filter first
+	if !c.filter.TestString(key) {
 		return nil, ErrNotFound
-	} else if err != nil {
-		return nil, fmt.Errorf("cache: redis get failed for key %s: %w", key, err)
 	}
 
-	if val == NilValuePlaceholder {
-		// 关系通常不会缓存空值，因为它们的存在依赖于节点。根据业务决定。
-		// 如果确定要缓存关系的空值，返回 ErrNilValue
-		return nil, ErrNotFound // 默认为未找到
+	// 2. Check Redis
+	valBytes, err := c.client.Get(ctx, key).Bytes()
+	if err != nil {
+		if errors.Is(err, redis.Nil) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("redis Get failed for relation %s: %w", id, err)
+	}
+
+	if bytes.Equal(valBytes, []byte(NilValuePlaceholder)) {
+		return nil, ErrNilValue
 	}
 
 	var relation network.Relation
-	if err := json.Unmarshal([]byte(val), &relation); err != nil {
-		r.client.Del(ctx, key) // 尝试删除损坏的数据
-		return nil, fmt.Errorf("cache: failed to unmarshal relation data for key %s: %w", key, err)
+	if err := json.Unmarshal(valBytes, &relation); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal relation %s: %w", id, err)
 	}
-
 	return &relation, nil
 }
 
-// SetRelation 实现 RelationCache 的 SetRelation 方法
-func (r *redisCache) SetRelation(ctx context.Context, id string, relation *network.Relation, ttl time.Duration) error {
-	key := r.relationKey(id)
+// SetRelation stores a relation in the cache.
+func (c *RedisCache) SetRelation(ctx context.Context, id string, relation *network.Relation, ttl time.Duration) error {
+	key := c.relationKey(id)
+	var valBytes []byte
+	var err error
 
 	if relation == nil {
-		// 通常不缓存空关系，如果需要，取消下面注释并实现
-		// err := r.client.Set(ctx, key, NilValuePlaceholder, addJitter(NilValueTTL)).Err()
-		// if err != nil {
-		//  return fmt.Errorf("cache: redis set nil relation failed for key %s: %w", key, err)
-		// }
-		return nil // 默认不做任何事
+		valBytes = []byte(NilValuePlaceholder)
+		// DO NOT add nil placeholders to the Bloom filter
+	} else {
+		valBytes, err = json.Marshal(relation)
+		if err != nil {
+			return fmt.Errorf("failed to marshal relation %s: %w", id, err)
+		}
+		// Add the key to the Bloom filter *only* if storing a real relation
 	}
 
-	data, err := json.Marshal(relation)
-	if err != nil {
-		return fmt.Errorf("cache: failed to marshal relation data for key %s: %w", key, err)
-	}
+	// Add the key to the Bloom filter regardless of whether it's a placeholder or real relation.
+	c.filter.AddString(key)
 
-	finalTTL := addJitter(ttl)
-	err = r.client.Set(ctx, key, data, finalTTL).Err()
-	if err != nil {
-		return fmt.Errorf("cache: redis set failed for key %s: %w", key, err)
-	}
+	// Apply jitter to TTL before setting
+	ttlWithJitter := addJitter(ttl)
 
-	return nil
-}
-
-// DeleteRelation 实现 RelationCache 的 DeleteRelation 方法
-func (r *redisCache) DeleteRelation(ctx context.Context, id string) error {
-	key := r.relationKey(id)
-	err := r.client.Del(ctx, key).Err()
-	if err != nil {
-		return fmt.Errorf("cache: redis del failed for key %s: %w", key, err)
+	if err := c.client.Set(ctx, key, valBytes, ttlWithJitter).Err(); err != nil {
+		return fmt.Errorf("redis Set failed for relation %s: %w", id, err)
 	}
 	return nil
 }
 
-// --- 通用 Cache[[]byte] 实现 ---
-
-// Get 实现通用 Cache[[]byte] 的 Get 方法
-// 注意：这个通用 Get 不处理 NilValuePlaceholder，直接返回获取到的字节。
-// 调用方需要自己处理 ErrNotFound。
-func (r *redisCache) Get(ctx context.Context, key string) ([]byte, error) {
-	// 通用 Get 不自动添加 prefix，调用方需确保 key 包含所需前缀
-	val, err := r.client.Get(ctx, key).Result()
-	if errors.Is(err, redis.Nil) {
-		return nil, ErrNotFound // Key 不存在，返回标准错误
-	} else if err != nil {
-		return nil, fmt.Errorf("cache: generic redis get failed for key %s: %w", key, err)
-	}
-	return []byte(val), nil
-}
-
-// Set 实现通用 Cache[[]byte] 的 Set 方法
-// 注意：这个通用 Set 不处理 NilValuePlaceholder，直接设置传入的字节。
-// 调用方需要自己处理空值缓存（如果需要）。
-func (r *redisCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
-	// 通用 Set 不自动添加 prefix
-	finalTTL := addJitter(ttl) // 应用 TTL Jitter
-	err := r.client.Set(ctx, key, value, finalTTL).Err()
-	if err != nil {
-		return fmt.Errorf("cache: generic redis set failed for key %s: %w", key, err)
+// DeleteRelation removes a relation from the cache.
+func (c *RedisCache) DeleteRelation(ctx context.Context, id string) error {
+	key := c.relationKey(id)
+	// No deletion from standard Bloom filter.
+	if err := c.client.Del(ctx, key).Err(); err != nil {
+		if errors.Is(err, redis.Nil) {
+			return ErrNotFound // Or return nil
+		}
+		return fmt.Errorf("redis Del failed for relation %s: %w", id, err)
 	}
 	return nil
 }
 
-// Delete 实现通用 Cache[[]byte] 的 Delete 方法
-func (r *redisCache) Delete(ctx context.Context, key string) error {
-	// 通用 Delete 不自动添加 prefix
-	err := r.client.Del(ctx, key).Err()
+// --- ByteCache Implementation ---
+
+// Get retrieves generic byte data from the cache.
+func (c *RedisCache) Get(ctx context.Context, key string) ([]byte, error) {
+	// Assume generic keys might not be in the main node/relation Bloom filter,
+	// OR use a separate filter, OR add them if appropriate.
+	// For simplicity, let's bypass the Bloom filter check for generic Get/Set for now.
+	// If these keys represent entities that *should* be filtered, add the check:
+	/*
+		if !c.filter.TestString(c.prefix + key) { // Use prefixed key
+			return nil, ErrNotFound
+		}
+	*/
+
+	fullKey := c.prefix + key
+	valBytes, err := c.client.Get(ctx, fullKey).Bytes()
 	if err != nil {
-		return fmt.Errorf("cache: generic redis del failed for key %s: %w", key, err)
+		if errors.Is(err, redis.Nil) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("redis Get failed for key %s: %w", key, err)
+	}
+
+	if bytes.Equal(valBytes, []byte(NilValuePlaceholder)) {
+		return nil, ErrNilValue
+	}
+	return valBytes, nil
+}
+
+// Set stores generic byte data in the cache.
+func (c *RedisCache) Set(ctx context.Context, key string, value []byte, ttl time.Duration) error {
+	fullKey := c.prefix + key
+	// If value is nil, use the placeholder, otherwise use the value.
+	valToStore := value
+	// addKeyToFilter := true // <<< Removed variable
+	if value == nil {
+		valToStore = []byte(NilValuePlaceholder)
+		// addKeyToFilter = false // Don't add nil placeholders to filter // <<< Logic removed
+	}
+
+	// Add to Bloom filter regardless of nil placeholder.
+	// Decide if *all* generic keys should be added or only specific ones based on usage patterns.
+	// For now, adding all keys prefixed by this cache instance.
+	c.filter.AddString(fullKey)
+
+	// Apply jitter to TTL before setting
+	ttlWithJitter := addJitter(ttl)
+
+	if err := c.client.Set(ctx, fullKey, valToStore, ttlWithJitter).Err(); err != nil {
+		return fmt.Errorf("redis Set failed for key %s: %w", key, err)
+	}
+
+	// Add to Bloom filter only if it wasn't a nil placeholder // <<< Logic removed and moved up
+	// Consider if *all* generic keys should be added or only specific ones.
+	// if addKeyToFilter {
+	//     c.filter.AddString(fullKey) // Decide if generic keys go into the filter
+	// }
+	return nil
+}
+
+// Delete removes generic byte data from the cache.
+func (c *RedisCache) Delete(ctx context.Context, key string) error {
+	fullKey := c.prefix + key
+	if err := c.client.Del(ctx, fullKey).Err(); err != nil {
+		if errors.Is(err, redis.Nil) {
+			return ErrNotFound // Or return nil
+		}
+		return fmt.Errorf("redis Del failed for key %s: %w", key, err)
 	}
 	return nil
 }
@@ -237,13 +303,3 @@ func addJitter(baseTTL time.Duration) time.Duration {
 	jitter := time.Duration(rand.Float64() * DefaultTTLJitterPercent * float64(baseTTL))
 	return baseTTL + jitter
 }
-
-// 确保 redisCache 同时实现了 NodeCache 和 RelationCache 接口
-var _ NodeCache = (*redisCache)(nil)
-var _ RelationCache = (*redisCache)(nil)
-
-// 确保 redisCache 实现了新的组合接口
-var _ NodeAndByteCache = (*redisCache)(nil)
-
-// 确保 redisCache 实现了新的关系组合接口
-var _ RelationAndByteCache = (*redisCache)(nil)

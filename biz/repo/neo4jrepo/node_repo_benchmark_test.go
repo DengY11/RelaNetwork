@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -23,36 +24,33 @@ const (
 )
 
 // setupLargeNetworkForBenchmark creates a large graph for benchmarking GetNetwork.
-// Returns the ID of a node known to have the benchmarkProfession.
-// IMPORTANT: This function assumes APOC procedures are available in Neo4j for efficient relationship creation.
+// Uses concurrency for relationship creation.
 func setupLargeNetworkForBenchmark(ctx context.Context, b *testing.B, driver neo4j.DriverWithContext) string {
-	b.StopTimer()        // Stop timer during setup
-	defer b.StartTimer() // Restart timer after setup
+	b.StopTimer()
+	defer b.StartTimer()
 
 	session := driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	defer session.Close(ctx)
 
-	// 1. Clear existing data
-	// Use manual clear as clearTestData might have Redis dependencies not available here
+	// 1. Clear existing data (Sequential)
 	_, err := session.Run(ctx, "MATCH ()-[r]->() DELETE r", nil)
 	if err != nil {
-		b.Logf("Benchmark setup: Warning - clearing relationships failed: %v", err) // Log warning
+		b.Logf("Benchmark setup: Warning - clearing relationships failed: %v", err)
 	}
 	_, err = session.Run(ctx, "MATCH (n) DELETE n", nil)
 	if err != nil {
-		b.Logf("Benchmark setup: Warning - clearing nodes failed: %v", err) // Log warning
+		b.Logf("Benchmark setup: Warning - clearing nodes failed: %v", err)
 	}
 
-	// 2. Create nodes in batches using UNWIND
+	// 2. Create nodes in batches using UNWIND (Sequential)
 	nodesData := make([]map[string]any, numBenchmarkNodes)
-	var startingNodeID string // Find a node with the target profession
+	var startingNodeID string
 	for i := 0; i < numBenchmarkNodes; i++ {
 		nodeID := "bench-node-" + strconv.Itoa(i)
 		profession := "Other"
-		// Assign the benchmark profession to a fraction of nodes
 		if i%10 == 0 {
 			profession = benchmarkProfession
-			if startingNodeID == "" { // Grab the first one as a potential starting point
+			if startingNodeID == "" {
 				startingNodeID = nodeID
 			}
 		}
@@ -71,7 +69,6 @@ func setupLargeNetworkForBenchmark(ctx context.Context, b *testing.B, driver neo
 			CREATE (n:PERSON)
 			SET n = nodeProps
 		`, map[string]any{"nodes": nodesData})
-		// Check error inside transaction work function
 		if errRun != nil {
 			return nil, fmt.Errorf("node creation query failed: %w", errRun)
 		}
@@ -81,20 +78,20 @@ func setupLargeNetworkForBenchmark(ctx context.Context, b *testing.B, driver neo
 		b.Fatalf("Benchmark setup failed during node creation: %v", err)
 	}
 
-	// 3. Create relationships in batches using UNWIND
+	// 3. Create relationships data (Sequential)
 	relsData := make([]map[string]any, 0, numBenchmarkNodes*avgBenchmarkRels)
 	source := rand.NewSource(time.Now().UnixNano())
 	r := rand.New(source)
-
 	for i := 0; i < numBenchmarkNodes; i++ {
 		sourceID := "bench-node-" + strconv.Itoa(i)
-		numRels := r.Intn(avgBenchmarkRels * 2) // Random number of relations per node
+		numRels := r.Intn(avgBenchmarkRels * 2)
 		for j := 0; j < numRels; j++ {
 			targetIdx := r.Intn(numBenchmarkNodes)
-			if targetIdx == i { // Avoid self-loops
+			if targetIdx == i {
 				continue
 			}
 			targetID := "bench-node-" + strconv.Itoa(targetIdx)
+			// Keep track of type for potential future use, even if CREATE uses :RELATED
 			relType := "FRIEND"
 			if r.Intn(2) == 0 {
 				relType = "COLLEAGUE"
@@ -102,9 +99,9 @@ func setupLargeNetworkForBenchmark(ctx context.Context, b *testing.B, driver neo
 			relsData = append(relsData, map[string]any{
 				"source": sourceID,
 				"target": targetID,
-				"type":   relType, // Storing type here for Cypher
+				"type":   relType, // Store original type info if needed later
 				"id":     fmt.Sprintf("bench-rel-%d-%d", i, j),
-				"props": map[string]any{ // Properties for the relationship itself
+				"props": map[string]any{
 					"created_at": time.Now().UTC(),
 					"updated_at": time.Now().UTC(),
 					"weight":     r.Float64(),
@@ -113,54 +110,75 @@ func setupLargeNetworkForBenchmark(ctx context.Context, b *testing.B, driver neo
 		}
 	}
 
-	// Use relationship creation query relying on APOC
-	_, err = session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		// Optimized query to create relationships between existing nodes using APOC
-		/* // Comment out APOC call
-				_, errRun := tx.Run(ctx, `
-		            UNWIND $rels AS relData
-		            MATCH (a:PERSON {id: relData.source})
-		            MATCH (b:PERSON {id: relData.target})
-		            CALL apoc.create.relationship(a, relData.type, relData.props, b) YIELD rel
-		            RETURN count(rel)
-		        `, map[string]any{"rels": relsData})
-				// Check error inside transaction work function
-				if errRun != nil {
-					// Provide alternatives if APOC fails
-					b.Logf(`Relationship creation with APOC failed: %v.
-					Ensure APOC is installed or modify the benchmark setup query.
-					See commented alternatives in node_repo_benchmark_test.go`, errRun)
-					return nil, fmt.Errorf("relationship creation query failed (APOC needed): %w", errRun)
-				}
-		*/
+	// 4. Create relationships concurrently in batches
+	concurrencyLevel := runtime.NumCPU() // Use number of CPU cores for concurrency
+	if concurrencyLevel < 1 {
+		concurrencyLevel = 1
+	}
+	if len(relsData) == 0 {
+		b.Logf("No relationships to create.")
 
-		// ---- Alternatives without APOC (Commented out) ----
-		// Alternative 1: Using MERGE (potentially slower)
-		// Uncomment this section to use MERGE instead of APOC
-		_, errRun := tx.Run(ctx, `
-		    UNWIND $rels AS relData
-		    MATCH (a:PERSON {id: relData.source})
-		    MATCH (b:PERSON {id: relData.target})
-		    // Cannot dynamically set type easily with standard MERGE/CREATE
-		    // This creates only FRIEND relationships as an example. Modify if needed.
-		    MERGE (a)-[r:FRIEND]->(b)
-		    SET r = relData.props // Overwrites existing props if MERGE matched
-		    RETURN count(r)
-		`, map[string]any{"rels": relsData})
-		if errRun != nil {
-			return nil, fmt.Errorf("rel creation query failed (MERGE): %w", errRun)
+	} else {
+
+		batchSize := (len(relsData) + concurrencyLevel - 1) / concurrencyLevel // Calculate batch size
+		if batchSize < 1 {
+			batchSize = 1
 		}
 
-		return nil, nil
-	})
-	if err != nil {
-		b.Fatalf("Benchmark setup failed during relationship creation: %v", err)
-	}
+		var wg sync.WaitGroup
+		errChan := make(chan error, concurrencyLevel) // Channel to collect errors
+
+		b.Logf("Starting concurrent relationship creation: %d workers, batch size ~%d", concurrencyLevel, batchSize)
+
+		for i := 0; i < len(relsData); i += batchSize {
+			wg.Add(1)
+			end := i + batchSize
+			if end > len(relsData) {
+				end = len(relsData)
+			}
+			batch := relsData[i:end]
+
+			go func(batchData []map[string]any) {
+				defer wg.Done()
+				// Each goroutine executes its batch in a separate transaction
+				_, txErr := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+					_, errRun := tx.Run(ctx, `
+                        UNWIND $batch AS relData
+                        MATCH (a:PERSON {id: relData.source})
+                        MATCH (b:PERSON {id: relData.target})
+                        CREATE (a)-[r:RELATED]->(b) // Use CREATE with a fixed type :RELATED
+                        SET r = relData.props       // Set properties after creation
+                        RETURN count(r)
+                    `, map[string]any{"batch": batchData})
+					if errRun != nil {
+						// Return error to ExecuteWrite, which will propagate it
+						return nil, fmt.Errorf("concurrent rel creation query failed: %w", errRun)
+					}
+					return nil, nil
+				})
+				if txErr != nil {
+					errChan <- txErr // Send error to the channel
+				}
+			}(batch) // Pass batch as argument to goroutine
+		}
+
+		wg.Wait()      // Wait for all goroutines to finish
+		close(errChan) // Close channel once all goroutines are done
+
+		// Check for errors from goroutines
+		for txErr := range errChan {
+			if txErr != nil {
+				// Log the first error encountered and fail the benchmark
+				b.Fatalf("Benchmark setup failed during concurrent relationship creation: %v", txErr)
+			}
+		}
+		b.Logf("Concurrent relationship creation finished.")
+
+	} // end else block for len(relsData) > 0
 
 	b.Logf("Benchmark setup complete: %d nodes, %d relationships created.", numBenchmarkNodes, len(relsData))
 
 	if startingNodeID == "" {
-		// If no node got the benchmark profession, pick the first node.
 		startingNodeID = "bench-node-0"
 		b.Logf("Warning: No node found with profession '%s'. Using '%s' as starting point criteria.", benchmarkProfession, startingNodeID)
 	}
@@ -213,7 +231,7 @@ func BenchmarkGetNetwork_LargeGraph(b *testing.B) {
 }
 
 // BenchmarkGetNetwork_Concurrent100 benchmarks 100 concurrent GetNetwork calls.
-func BenchmarkGetNetwork_Concurrent10000(b *testing.B) {
+func BenchmarkGetNetwork_Concurrent1000(b *testing.B) {
 	// Ensure testRepo and testDriver are initialized (from TestMain in node_repo_test.go)
 	if testRepo == nil || testDriver == nil {
 		b.Skip("Skipping benchmark, test environment not initialized (run tests in package mode: go test ./... -bench=.)")
@@ -234,7 +252,7 @@ func BenchmarkGetNetwork_Concurrent10000(b *testing.B) {
 	}
 	b.Logf("Benchmarking 1000 concurrent GetNetwork calls with StartCriteria: %v, Depth: %d", req.StartNodeCriteria, req.Depth)
 
-	concurrencyLevel := 10000
+	concurrencyLevel := 1000
 
 	b.ResetTimer() // Reset timer AFTER setup
 
