@@ -1,6 +1,7 @@
 package neo4jrepo
 
 import (
+	"errors"
 	"fmt"
 	network "labelwall/biz/model/relationship/network"
 	"strings"
@@ -8,16 +9,42 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
 )
 
+// Define repository-level error for path not found HERE
+var ErrPathNotFound = errors.New("repo: path not found")
+
 // --- 通用辅助函数 ---
 
 // isNotFoundError 检查错误是否表示"未找到"
-// 注意：这个实现需要与你的 DAL 层如何返回 Not Found 错误保持一致
+// REPLACED with more robust logic
 func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// 示例：如果 DAL 层返回包含特定字符串的错误信息
-	return strings.Contains(strings.ToLower(err.Error()), "not found")
+	// 1. 检查 Repo 层定义的 ErrPathNotFound (defined above)
+	if errors.Is(err, ErrPathNotFound) {
+		return true
+	}
+
+	// 2. DAL 层错误检查 (remains difficult without exported errors)
+
+	// 3. 字符串检查后备
+	lowerCaseErr := strings.ToLower(err.Error())
+	if strings.Contains(lowerCaseErr, "not found") {
+		return true
+	}
+	if strings.Contains(lowerCaseErr, "could not find node") {
+		return true
+	}
+	if strings.Contains(lowerCaseErr, "could not find relationship") {
+		return true
+	}
+	// Add check for the specific error message from path finding
+	if strings.Contains(lowerCaseErr, "result contains no more records") { // Specific check for path finding
+		return true
+	}
+	// Add other specific 'not found' messages if needed
+
+	return false
 }
 
 // labelToNodeType 从 Neo4j 标签列表推断 Thrift NodeType

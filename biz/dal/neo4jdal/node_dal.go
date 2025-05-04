@@ -416,29 +416,42 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 	}
 
 	readResult, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		// 构建 Cypher 查询
-		// 1. 匹配起始节点 (指定职业的 PERSON)
-		// 2. 查找从起始节点出发，深度在 1 到 $depth 之间的所有路径 (不限关系类型和方向)
-		// 3. UNWIND 将路径中的节点和关系展开成行
-		// 4. 使用 distinct 收集唯一的节点和关系
-		// 5. 使用列表切片进行分页 (LIMIT/OFFSET)
-		// 警告：在切片前 collect 可能消耗大量内存！
-		query := fmt.Sprintf(`
-            MATCH path = (p:PERSON {profession: $profession})-[*1..%d]-(neighbor)
-            WITH path
-            UNWIND nodes(path) as n
-            UNWIND relationships(path) as r
-            WITH collect(distinct n) as all_nodes, collect(distinct r) as all_rels
-            RETURN
-                CASE size(all_nodes) > $offset WHEN true THEN all_nodes[$offset..$offset+$limit] ELSE [] END AS nodes,
-                CASE size(all_rels) > $offset WHEN true THEN all_rels[$offset..$offset+$limit] ELSE [] END AS relations
-        `, depth) // 在格式字符串中直接使用 depth
+		// REMOVE unused declarations inside the transaction function
+		/*
+			// 使用 map 存储节点和关系，确保唯一性
+			var nodes = make([]neo4j.Node, 0)
+			var relationships = make([]neo4j.Relationship, 0)
+		*/
 
+		// Dynamically build the initial MATCH clause based on profession
+		var matchClause string
 		params := map[string]any{
-			"profession": profession,
-			"offset":     offset,
-			"limit":      limit,
+			// Parameters needed regardless of the match clause
+			"offset": offset,
+			"limit":  limit,
 		}
+
+		if profession != "" {
+			// If profession is provided, match PERSON nodes with that profession
+			matchClause = "MATCH path = (startNode:PERSON {profession: $profession})-[*1..%d]-(neighbor)"
+			params["profession"] = profession
+		} else {
+			// If profession is empty, match any node as startNode
+			matchClause = "MATCH path = (startNode)-[*1..%d]-(neighbor)"
+		}
+
+		// Combine clauses
+		// Warning: UNWIND and collect before slicing can be memory intensive for large graphs!
+		query := fmt.Sprintf(`
+			%s
+			WITH path
+			UNWIND nodes(path) as n
+			UNWIND relationships(path) as r
+			WITH collect(distinct n) as all_nodes, collect(distinct r) as all_rels
+			RETURN
+				CASE size(all_nodes) > $offset WHEN true THEN all_nodes[$offset..$offset+$limit] ELSE [] END AS nodes,
+				CASE size(all_rels) > $offset WHEN true THEN all_rels[$offset..$offset+$limit] ELSE [] END AS relations
+		`, fmt.Sprintf(matchClause, depth)) // Apply depth format to the chosen matchClause
 
 		result, err := tx.Run(ctx, query, params)
 		if err != nil {
@@ -488,12 +501,13 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 		for i, relRaw := range relsRaw {
 			rel, relAssertionOk := relRaw.(dbtype.Relationship)
 			if !relAssertionOk {
-				return nil, fmt.Errorf("DAL: 无法将 'relations' 列表中的元素断言为 dbtype.Relationship")
+				return nil, fmt.Errorf("DAL: 无法将 GetNetwork 'relations' 列表中的元素断言为 dbtype.Relationship")
 			}
 			relationships[i] = rel
 		}
 
-		return map[string]any{"nodes": nodes, "rels": relationships}, nil
+		// Return the results in a map for the outer function to process
+		return map[string]any{"nodes": nodes, "rels": relationships}, nil // Use the locally parsed 'nodes' and 'relationships'
 	})
 
 	if err != nil {

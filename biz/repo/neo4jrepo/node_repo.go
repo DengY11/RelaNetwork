@@ -54,6 +54,11 @@ const (
 	GetPathEmptyTTL = 2 * time.Minute
 )
 
+// Define repository-level errors
+var (
+	ErrInvalidDepth = errors.New("repo: invalid depth value")
+)
+
 // neo4jNodeRepo 实现了 NodeRepository 接口
 type neo4jNodeRepo struct {
 	driver       neo4j.DriverWithContext
@@ -508,12 +513,16 @@ func generateGetNetworkCacheKey(req *network.GetNetworkRequest, maxDepth int32, 
 // GetNetwork 获取网络图谱 (节点和关系)，带缓存
 // TODO: 从config文件中读取maxDepth
 func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkRequest) ([]*network.Node, []*network.Relation, error) {
-	// 1. 处理参数和计算默认值 (与缓存键生成相关)
+	// 1. 处理参数和计算默认值
 	var maxDepth int32 = 1 // 默认深度
 	if req.IsSetDepth() {
 		maxDepth = *req.Depth
-		if maxDepth <= 0 || maxDepth > 5 {
-			maxDepth = 1
+		if maxDepth == 0 {
+			// Return error if depth is explicitly set to 0, as per user suggestion
+			return nil, nil, fmt.Errorf("%w: depth 0 is not allowed for GetNetwork", ErrInvalidDepth)
+		}
+		if maxDepth < 0 || maxDepth > 5 { // Keep max depth check
+			maxDepth = 1 // Reset to default if invalid range
 		}
 	}
 	var limit int64 = 100 // 默认限制
@@ -597,49 +606,52 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 	// 5. 缓存未命中或出错，直接查询数据库
 	resultNodes, resultRelations, dbNodes, dbRelations, err := r.getNetworkDirectAndRaw(ctx, req, maxDepth, limit, offset)
 	if err != nil {
-		return nil, nil, err // 直接返回数据库错误
+		// 如果 DAL 层出错，不进行缓存，直接返回错误
+		return nil, nil, err
 	}
 
-	// 6. 缓存结果
-	if err == nil {
-		if len(dbNodes) == 0 && len(dbRelations) == 0 {
-			// 6.1 缓存空标记
-			setErr := r.cache.Set(ctx, cacheKey, []byte(GetNetworkEmptyPlaceholder), GetNetworkEmptyTTL)
+	// 6. 缓存结果 (只有在 DAL 没有错误时才执行)
+	// 判断是否真的有结果 (使用 getNetworkDirectAndRaw 返回的映射后结果)
+	isEmptyResult := len(resultNodes) == 0 && len(resultRelations) == 0
+
+	if isEmptyResult {
+		// 6.1 缓存空标记
+		setErr := r.cache.Set(ctx, cacheKey, []byte(GetNetworkEmptyPlaceholder), GetNetworkEmptyTTL)
+		if setErr != nil {
+			fmt.Printf("ERROR: Repo: GetNetwork cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
+		} else {
+			fmt.Printf("INFO: Repo: GetNetwork set empty placeholder to cache (Key: %s)\n", cacheKey) // TODO: Use logger
+		}
+	} else {
+		// 6.2 提取 ID 并缓存实际结果
+		//    使用 getNetworkDirectAndRaw 返回的原始 db* 变量来获取 ID
+		nodeIDs := make([]string, 0, len(dbNodes))
+		for _, dbNode := range dbNodes {
+			if nodeID := getStringProp(dbNode.Props, "id", ""); nodeID != "" {
+				nodeIDs = append(nodeIDs, nodeID)
+			}
+		}
+		relationIDs := make([]string, 0, len(dbRelations))
+		for _, dbRel := range dbRelations {
+			if relID := getStringProp(dbRel.Props, "id", ""); relID != "" {
+				relationIDs = append(relationIDs, relID)
+			}
+		}
+
+		cacheValue := getNetworkCacheValue{
+			NodeIDs:     nodeIDs,
+			RelationIDs: relationIDs,
+		}
+		var buffer bytes.Buffer
+		if encErr := json.NewEncoder(&buffer).Encode(cacheValue); encErr == nil {
+			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), GetNetworkCacheTTL)
 			if setErr != nil {
-				fmt.Printf("ERROR: Repo: GetNetwork cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
+				fmt.Printf("ERROR: Repo: GetNetwork cache set failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
 			} else {
-				fmt.Printf("INFO: Repo: GetNetwork set empty placeholder to cache (Key: %s)\n", cacheKey) // TODO: Use logger
+				fmt.Printf("INFO: Repo: GetNetwork set data to cache (Key: %s)\n", cacheKey) // TODO: Use logger
 			}
 		} else {
-			// 6.2 提取 ID 并缓存
-			nodeIDs := make([]string, 0, len(dbNodes))
-			for _, dbNode := range dbNodes {
-				if nodeID := getStringProp(dbNode.Props, "id", ""); nodeID != "" {
-					nodeIDs = append(nodeIDs, nodeID)
-				}
-			}
-			relationIDs := make([]string, 0, len(dbRelations))
-			for _, dbRel := range dbRelations {
-				if relID := getStringProp(dbRel.Props, "id", ""); relID != "" {
-					relationIDs = append(relationIDs, relID)
-				}
-			}
-
-			cacheValue := getNetworkCacheValue{
-				NodeIDs:     nodeIDs,
-				RelationIDs: relationIDs,
-			}
-			var buffer bytes.Buffer
-			if err := json.NewEncoder(&buffer).Encode(cacheValue); err == nil {
-				setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), GetNetworkCacheTTL)
-				if setErr != nil {
-					fmt.Printf("ERROR: Repo: GetNetwork cache set failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
-				} else {
-					fmt.Printf("INFO: Repo: GetNetwork set data to cache (Key: %s)\n", cacheKey) // TODO: Use logger
-				}
-			} else {
-				fmt.Printf("ERROR: Repo: GetNetwork cache value encode failed (Key: %s): %v\n", cacheKey, err) // TODO: Use logger
-			}
+			fmt.Printf("ERROR: Repo: GetNetwork cache value encode failed (Key: %s): %v\n", cacheKey, encErr) // TODO: Use logger
 		}
 	}
 
@@ -663,8 +675,17 @@ func (r *neo4jNodeRepo) getNetworkDirectAndRaw(ctx context.Context, req *network
 	// 调用 DAL 层获取网络数据
 	dbNodes, dbRelations, err = r.nodeDAL.ExecGetNetwork(ctx, session, req.Profession, maxDepth, limit, offset)
 	if err != nil {
+		// GetNetwork 通常不认为"未找到匹配 profession 的节点"是错误，DAL 应返回空列表
+		// 仅处理真正的执行错误
 		err = fmt.Errorf("repo: 调用 DAL 获取网络失败: %w", err)
 		return // 返回错误和空的 slices
+	}
+
+	// 如果结果集为空 (可能是原始为空)
+	if len(dbNodes) == 0 && len(dbRelations) == 0 {
+		resultNodes = []*network.Node{}
+		resultRelations = []*network.Relation{}
+		return // return empty slices and nil error
 	}
 
 	// 映射节点
@@ -834,22 +855,28 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 	// 5. 缓存未命中或出错，直接查询数据库
 	resultNodes, resultRelations, dbNodes, dbRelations, err := r.getPathDirectAndRaw(ctx, req, maxDepth, relationTypesStr)
 	if err != nil {
-		// 5.1 如果是路径未找到错误，缓存空标记
-		if isNotFoundError(err) { // 检查是否是 DAL 返回的 Not Found
+		// 5.1 处理错误和缓存空占位符
+		if isNotFoundError(err) { // 确保 isNotFoundError 能识别 DAL 的错误和 Repo 包装的错误
+			fmt.Printf("INFO: Repo: GetPath query returned not found (Key: %s), caching empty placeholder.\n", cacheKey)
 			setErr := r.cache.Set(ctx, cacheKey, []byte(GetPathEmptyPlaceholder), GetPathEmptyTTL)
 			if setErr != nil {
 				fmt.Printf("ERROR: Repo: GetPath cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
 			} else {
 				fmt.Printf("INFO: Repo: GetPath set empty placeholder to cache (Key: %s)\n", cacheKey) // TODO: Use logger
 			}
-			return nil, nil, err // 透传原始的 Not Found 错误
+			// 返回原始的 Not Found 错误给调用者
+			return nil, nil, err
+		} else {
+			// 其他数据库错误，直接返回，不缓存占位符
+			fmt.Printf("ERROR: Repo: GetPath query failed (Key: %s): %v\n", cacheKey, err)
+			return nil, nil, err
 		}
-		// 其他数据库错误
-		return nil, nil, err
 	}
 
-	// 6. 缓存结果 (查询成功)
-	if err == nil && (len(dbNodes) > 0 || len(dbRelations) > 0) { // 确保有路径数据才缓存
+	// 6. 缓存结果 (查询成功且找到路径)
+	// 注意：之前的逻辑是 (len(dbNodes) > 0 || len(dbRelations) > 0)，对于只有单个节点路径可能不适用。
+	// 只要 err == nil 并且不是 not found，就认为路径找到了（即使只有一个节点）
+	if len(dbNodes) > 0 { // 至少要有一个节点才算有效路径
 		// 6.1 按顺序提取 ID
 		nodeIDs := make([]string, 0, len(dbNodes))
 		for _, dbNode := range dbNodes {
@@ -909,12 +936,24 @@ func (r *neo4jNodeRepo) getPathDirectAndRaw(ctx context.Context, req *network.Ge
 	// 调用 DAL 层获取路径数据
 	dbNodes, dbRelations, err = r.nodeDAL.ExecGetPath(ctx, session, req.SourceID, req.TargetID, maxDepth, relationTypesStr)
 	if err != nil {
-		if isNotFoundError(err) { // DAL 返回 Not Found 时，直接包装并返回
-			err = fmt.Errorf("repo: path not found between %s and %s: %w", req.SourceID, req.TargetID, err)
-			return
+		// 直接将 DAL 错误（包括 Not Found）向上传递
+		// 在 GetPath 方法中处理 Not Found 的缓存逻辑和错误返回
+		// 包装一下错误，以便上层识别来源
+		if isNotFoundError(err) {
+			// 保持原始错误类型，但添加上下文
+			err = fmt.Errorf("repo: path not found between %s and %s (depth %d, types %v): %w", req.SourceID, req.TargetID, maxDepth, relationTypesStr, err)
+		} else {
+			err = fmt.Errorf("repo: 调用 DAL 获取路径失败: %w", err)
 		}
-		err = fmt.Errorf("repo: 调用 DAL 获取路径失败: %w", err)
-		return // 返回其他 DAL 错误
+		return // 返回错误和空的 slices
+	}
+
+	// 如果 DAL 层没有返回错误，但返回了空节点，也视为未找到路径
+	if len(dbNodes) == 0 {
+		// 显式返回一个可被 isNotFoundError 识别的错误
+		// err = neo4jdal.ErrNotFound // Cannot use this as it's not exported
+		err = fmt.Errorf("repo: path not found between %s and %s (empty result from DAL): %w", req.SourceID, req.TargetID, ErrPathNotFound)
+		return // 返回错误和空的 slices
 	}
 
 	// 映射节点 (保持顺序)
