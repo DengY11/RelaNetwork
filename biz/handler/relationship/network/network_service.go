@@ -6,9 +6,10 @@ import (
 	"context"
 	"fmt"
 
+	network "labelwall/biz/model/relationship/network"
+
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	network "labelwall/biz/model/relationship/network"
 )
 
 // GetNetwork .
@@ -31,7 +32,7 @@ func GetNetwork(ctx context.Context, c *app.RequestContext) {
 	resp.Nodes = make([]*network.Node, 0)
 
 	for k, v := range c.Params {
-		s := fmt.Sprintf("%s %s", k, v)
+		s := fmt.Sprintf("%s %s", fmt.Sprint(k), v)
 		respMessage += s
 	}
 

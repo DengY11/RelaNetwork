@@ -291,115 +291,147 @@ func (d *neo4jNodeDAL) ExecDeleteNode(ctx context.Context, session neo4j.Session
 	return fmt.Errorf("DAL: 删除节点事务返回了非预期的结果类型")
 }
 
-// ExecSearchNodes 执行搜索节点的 Cypher，支持按类型和多个属性模糊搜索，并进行分页。
-// criteria map 的 key 是属性名，value 是要搜索的字符串值。
+// ExecSearchNodes 执行搜索节点的 Cypher，返回匹配的节点、标签列表和总数。
 func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.SessionWithContext, criteria map[string]string, nodeType *network.NodeType, limit, offset int64) ([]neo4j.Node, [][]string, int64, error) {
+	var matchClause string
+	var whereClauses []string
+	// Base params map for the main query, including pagination
+	mainParams := map[string]any{
+		"limit":  limit,
+		"offset": offset,
+	}
+	// Separate params map for the count query, initially empty or with only criteria params
+	countParams := make(map[string]any)
 
-	// return value
-	var (
-		nodes      []neo4j.Node
-		labelsList [][]string
-		total      int64 = 0
-	)
+	if nodeType != nil {
+		matchClause = fmt.Sprintf("MATCH (n:%s)", nodeType.String())
+	} else {
+		matchClause = "MATCH (n)"
+	}
 
-	readResult, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		var queryBuilder strings.Builder // 用于构建查询语句
-		params := map[string]any{        // 初始化查询参数
-			"limit":  limit,
-			"offset": offset,
-		}
+	propIdx := 0
+	for key, value := range criteria {
+		paramName := fmt.Sprintf("prop_%d", propIdx)
+		whereClauses = append(whereClauses, fmt.Sprintf("n.%s = $%s", key, paramName))
+		// Add criteria params to BOTH maps
+		mainParams[paramName] = value
+		countParams[paramName] = value
+		propIdx++
+	}
 
-		// 构建 MATCH 子句，如果指定了节点类型，则添加标签过滤。
-		matchClause := "MATCH (n)"
-		if nodeType != nil {
-			matchClause = fmt.Sprintf("MATCH (n:%s)", nodeType.String())
-		}
-		queryBuilder.WriteString(matchClause)
+	// Build count query string
+	countQueryBuilder := strings.Builder{}
+	countQueryBuilder.WriteString(matchClause)
+	if len(whereClauses) > 0 {
+		countQueryBuilder.WriteString(" WHERE ")
+		countQueryBuilder.WriteString(strings.Join(whereClauses, " AND "))
+	}
+	countQueryBuilder.WriteString(" RETURN count(DISTINCT n) AS total")
+	countQuery := countQueryBuilder.String()
 
-		// 构建 WHERE 子句
-		whereClauses := []string{}
-		if len(criteria) > 0 {
-			queryBuilder.WriteString(" WHERE ")
-			i := 0
-			for key, value := range criteria {
-				// 简单处理：假设所有传入的 criteria key 都是有效的节点属性名
-				// 并且所有 value 都需要进行模糊匹配
-				if key != "" && value != "" { // 忽略空的键或值
-					paramName := fmt.Sprintf("criteria_%d", i)
-					// 使用 =~ 进行大小写不敏感的正则匹配
-					// 注意：确保属性名 key 是安全的，不允许用户直接输入 key 以防注入 Cypher 片段
-					// Repo 层应负责验证传入的 criteria key 是合法的属性名 (如 name, profession)
-					whereClauses = append(whereClauses, fmt.Sprintf("n.%s =~ $%s", key, paramName))
-					params[paramName] = ".*(?i)" + value + ".*" // 构造正则表达式
-					i++
-				}
-			}
-		}
-		if len(whereClauses) > 0 {
-			queryBuilder.WriteString(strings.Join(whereClauses, " AND "))
-		} else {
-			// 如果没有提供任何搜索条件，为了避免匹配所有节点，可以返回错误或默认行为
-			// 这里我们选择返回空结果，因为没有指定任何搜索属性
-			return map[string]any{"nodes": nodes, "labels": labelsList, "total": total}, nil
-		}
+	// Build main query string
+	queryBuilder := strings.Builder{}
+	queryBuilder.WriteString(matchClause)
+	if len(whereClauses) > 0 {
+		queryBuilder.WriteString(" WHERE ")
+		queryBuilder.WriteString(strings.Join(whereClauses, " AND "))
+	}
+	queryBuilder.WriteString(" RETURN DISTINCT n, labels(n) AS labels")
+	queryBuilder.WriteString(" ORDER BY n.name")
+	queryBuilder.WriteString(" SKIP $offset LIMIT $limit")
+	finalQuery := queryBuilder.String()
 
-		// --- 第一步：获取匹配的总数（用于分页）---
-		countQuery := queryBuilder.String() + " RETURN count(n) AS total"
-		countResult, err := tx.Run(ctx, countQuery, params)
+	var nodes []neo4j.Node
+	var labelsList [][]string
+	var total int64
+
+	// Use ExecuteRead for both queries within the same transaction
+	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		// Get total count first using countParams (no limit/offset)
+		countResult, err := tx.Run(ctx, countQuery, countParams) // <<< Use countParams
 		if err != nil {
-			return nil, fmt.Errorf("DAL: 运行搜索节点总数查询失败: %w", err)
+			return nil, fmt.Errorf("DAL: running count query failed: %w", err)
 		}
 		countRecord, err := countResult.Single(ctx)
 		if err != nil {
-			usageErr := new(neo4j.UsageError)
-			if errors.As(err, &usageErr) && strings.Contains(usageErr.Error(), "result contains no more records") {
+			if neo4jErr := new(neo4j.UsageError); errors.As(err, &neo4jErr) && strings.Contains(neo4jErr.Error(), "result contains no more records") {
 				total = 0
 			} else {
-				return nil, fmt.Errorf("DAL: 获取搜索节点总数失败: %w", err)
+				return nil, fmt.Errorf("DAL: getting count result failed: %w", err)
 			}
 		} else {
-			totalVal, _ := countRecord.Get("total")
-			total = totalVal.(int64)
-		}
-
-		if total == 0 {
-			return map[string]any{"nodes": nodes, "labels": labelsList, "total": total}, nil
-		}
-
-		// --- 第二步：获取分页后的节点数据 ---
-		// 添加排序，例如按名称排序
-		dataQuery := queryBuilder.String() + " RETURN n, labels(n) AS labels ORDER BY n.name SKIP $offset LIMIT $limit"
-		dataResult, err := tx.Run(ctx, dataQuery, params)
-		if err != nil {
-			return nil, fmt.Errorf("DAL: 运行搜索节点数据查询失败: %w", err)
-		}
-
-		records, err := dataResult.Collect(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("DAL: 收集搜索节点结果失败: %w", err)
-		}
-
-		nodes = make([]neo4j.Node, len(records))
-		labelsList = make([][]string, len(records))
-		for i, record := range records {
-			nodeInterface, _ := record.Get("n")
-			labelsInterface, _ := record.Get("labels")
-			nodes[i] = nodeInterface.(dbtype.Node)
-			labelsRaw := labelsInterface.([]any)
-			labels := make([]string, len(labelsRaw))
-			for j, l := range labelsRaw {
-				labels[j] = l.(string)
+			totalInterface, ok := countRecord.Get("total")
+			if !ok {
+				return nil, fmt.Errorf("DAL: count result missing 'total' field")
 			}
-			labelsList[i] = labels
+			totalConv, ok := totalInterface.(int64)
+			if !ok {
+				return nil, fmt.Errorf("DAL: 'total' field is not int64")
+			}
+			total = totalConv // Assign converted value
 		}
-		return map[string]any{"nodes": nodes, "labels": labelsList, "total": total}, nil
+
+		// If total is 0, no need to run the main query
+		if total == 0 {
+			nodes = []neo4j.Node{}
+			labelsList = [][]string{}
+			return nil, nil // Indicate success with empty results
+		}
+
+		// Run the main query to get paginated nodes using mainParams (with limit/offset)
+		result, err := tx.Run(ctx, finalQuery, mainParams) // <<< Use mainParams
+		if err != nil {
+			return nil, fmt.Errorf("DAL: running main search query failed: %w", err)
+		}
+
+		// Collect results
+		records, err := result.Collect(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("DAL: collecting search results failed: %w", err)
+		}
+
+		nodes = make([]neo4j.Node, 0, len(records))
+		labelsList = make([][]string, 0, len(records))
+		for _, record := range records {
+			nodeInterface, nodeOk := record.Get("n")
+			labelsInterface, labelsOk := record.Get("labels")
+			if !nodeOk || !labelsOk {
+				fmt.Println("DAL: Warning - search result record missing 'n' or 'labels'") // TODO: Use logger
+				continue
+			}
+			dbNode, nodeCastOk := nodeInterface.(dbtype.Node)
+			labelsRaw, labelsCastOk := labelsInterface.([]any)
+			if !nodeCastOk || !labelsCastOk {
+				fmt.Println("DAL: Warning - search result record has incorrect type for 'n' or 'labels'") // TODO: Use logger
+				continue
+			}
+
+			labels := make([]string, len(labelsRaw))
+			validLabels := true
+			for i, l := range labelsRaw {
+				labelStr, ok := l.(string)
+				if !ok {
+					fmt.Printf("DAL: Warning - label is not a string: %v\n", l) // TODO: Use logger
+					validLabels = false
+					break
+				}
+				labels[i] = labelStr
+			}
+			if validLabels {
+				nodes = append(nodes, dbNode)
+				labelsList = append(labelsList, labels)
+			}
+		}
+
+		return nil, nil // Transaction successful
 	})
 
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, nil, 0, err // Return error from transaction
 	}
-	resultMap := readResult.(map[string]any)
-	return resultMap["nodes"].([]neo4j.Node), resultMap["labels"].([][]string), resultMap["total"].(int64), nil
+
+	// Return collected results
+	return nodes, labelsList, total, nil
 }
 
 // ExecGetNetwork 执行网络查询的 Cypher。
@@ -411,8 +443,16 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 	relationTypes []network.RelationType,
 	nodeTypes []network.NodeType,
 ) ([]neo4j.Node, []neo4j.Relationship, error) {
-	var nodes []neo4j.Node
-	var relationships []neo4j.Relationship
+
+	// --- Handle Depth 0 Case --- (Added)
+	if depth == 0 {
+		return d.execGetNetworkDepthZero(ctx, session, startNodeCriteria, limit, offset, nodeTypes)
+	}
+	// --- End Handle Depth 0 Case ---
+
+	// Existing logic for depth > 0
+	var nodes []dbtype.Node
+	var relationships []dbtype.Relationship
 
 	// 确保深度至少为 1
 	if depth <= 0 {
@@ -516,7 +556,7 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 		if !ok {
 			return nil, fmt.Errorf("DAL: 无法将 'nodes' 断言为 []any")
 		}
-		nodes = make([]neo4j.Node, len(nodesRaw))
+		nodes = make([]dbtype.Node, len(nodesRaw))
 		for i, nodeRaw := range nodesRaw {
 			node, nodeAssertionOk := nodeRaw.(dbtype.Node)
 			if !nodeAssertionOk {
@@ -528,7 +568,7 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 		if !ok {
 			return nil, fmt.Errorf("DAL: 无法将 'relations' 断言为 []any")
 		}
-		relationships = make([]neo4j.Relationship, len(relsRaw))
+		relationships = make([]dbtype.Relationship, len(relsRaw))
 		for i, relRaw := range relsRaw {
 			rel, relAssertionOk := relRaw.(dbtype.Relationship)
 			if !relAssertionOk {
@@ -545,10 +585,78 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 	}
 
 	resultMap := readResult.(map[string]any)
-	finalNodes := resultMap["nodes"].([]neo4j.Node)
-	finalRels := resultMap["rels"].([]neo4j.Relationship)
+	finalNodes := resultMap["nodes"].([]dbtype.Node)
+	finalRels := resultMap["rels"].([]dbtype.Relationship)
 
 	return finalNodes, finalRels, nil
+}
+
+// --- Added Helper for Depth 0 --- (New Function)
+func (d *neo4jNodeDAL) execGetNetworkDepthZero(
+	ctx context.Context, session neo4j.SessionWithContext,
+	startNodeCriteria map[string]string,
+	limit, offset int64,
+	nodeTypes []network.NodeType,
+) ([]neo4j.Node, []neo4j.Relationship, error) {
+
+	var startNodeClauses []string
+	params := map[string]any{}
+	for key, value := range startNodeCriteria {
+		paramName := "start_" + key
+		startNodeClauses = append(startNodeClauses, fmt.Sprintf("startNode.%s = $%s", key, paramName))
+		params[paramName] = value
+	}
+
+	// Build node type filter if provided
+	nodeTypeFilter := ""
+	if len(nodeTypes) > 0 {
+		var typeLabels []string
+		for _, nt := range nodeTypes {
+			typeLabels = append(typeLabels, nt.String())
+		}
+		nodeTypeFilter = fmt.Sprintf("AND any(lbl IN labels(startNode) WHERE lbl IN ['%s'])", strings.Join(typeLabels, "', '"))
+	}
+
+	// Build the simplified query for depth 0
+	query := fmt.Sprintf(`
+        MATCH (startNode)
+        WHERE %s %s
+        RETURN startNode
+        ORDER BY startNode.id // Consistent ordering is good practice
+        SKIP $offset
+        LIMIT $limit
+    `, strings.Join(startNodeClauses, " AND "), nodeTypeFilter)
+
+	params["offset"] = offset
+	params["limit"] = limit
+
+	var nodes []dbtype.Node
+	_, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		result, err := tx.Run(ctx, query, params)
+		if err != nil {
+			return nil, fmt.Errorf("DAL: 运行 GetNetwork(Depth 0) 查询失败: %w", err)
+		}
+		records, err := result.Collect(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("DAL: 收集 GetNetwork(Depth 0) 结果失败: %w", err)
+		}
+		for _, record := range records {
+			nodeInterface, _ := record.Get("startNode")
+			if dbNode, ok := nodeInterface.(dbtype.Node); ok {
+				nodes = append(nodes, dbNode)
+			} else {
+				fmt.Printf("WARN: GetNetwork(Depth 0) 结果中的 'startNode' 类型断言失败\n")
+			}
+		}
+		return nil, nil
+	})
+
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// For depth 0, relations are always empty
+	return nodes, []dbtype.Relationship{}, nil
 }
 
 // ExecGetPath 执行路径查询的 Cypher。

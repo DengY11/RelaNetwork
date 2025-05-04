@@ -52,6 +52,11 @@ const (
 	GetPathEmptyPlaceholder = "__EMPTY_PATH__"
 	// GetPathEmptyTTL is the TTL for empty path results
 	GetPathEmptyTTL = 2 * time.Minute
+
+	// Expose prefixes for testing cleanup (Added)
+	NodeCachePrefix          = "node:"
+	RelationCachePrefix      = "relation:"
+	NodeRelationsCachePrefix = "nodrels:"
 )
 
 // Define repository-level errors
@@ -557,15 +562,51 @@ func generateGetNetworkCacheKey(req *network.GetNetworkRequest, maxDepth int32, 
 // GetNetwork 获取网络图谱 (节点和关系)，带缓存
 // TODO: 从config文件中读取maxDepth
 func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkRequest) ([]*network.Node, []*network.Relation, error) {
-	// 1. 处理参数和计算默认值
-	var maxDepth int32 = 1 // 默认深度
-	// Directly access Depth as it's not optional/pointer in the latest thrift
-	if req.Depth > 0 { // Check if Depth is set and valid
-		maxDepth = req.Depth
-		if maxDepth > 5 { // Keep max depth check
-			maxDepth = 1 // Reset to default if invalid range (e.g., > 5)
+	// --- Handle Depth < 0 --- (New)
+	if req.Depth < 0 {
+		return nil, nil, ErrInvalidDepth // Return specific error for negative depth
+	}
+
+	// --- Handle Depth == 0 --- (New)
+	if req.Depth == 0 {
+		fmt.Println("INFO: Repo: GetNetwork called with Depth 0, finding start nodes only.") // TODO: Use logger
+		// Directly find start nodes using SearchNodes logic
+		searchReq := &network.SearchNodesRequest{
+			Criteria: req.StartNodeCriteria,
+			Type:     nil,                                      // SearchNodes DAL/Repo handles type matching if needed based on criteria or labels
+			Limit:    func(i int32) *int32 { return &i }(1000), // Use a reasonable limit for start nodes
+			Offset:   func(i int32) *int32 { return &i }(0),
 		}
-	} // If Depth is 0 or less, the default of 1 will be used.
+		// If specific node types are provided in GetNetwork request, set them in SearchNodes request
+		if req.IsSetNodeTypes() && len(req.NodeTypes) > 0 {
+			// Note: SearchNodes expects *NodeType, and currently only supports one.
+			// We'll just use the first one specified if multiple are given for depth=0 case.
+			// A more robust solution might involve modifying SearchNodes or using a different DAL method.
+			if len(req.NodeTypes) > 1 {
+				fmt.Printf("WARN: Repo: GetNetwork with Depth 0 received multiple NodeTypes, using only the first (%s) for start node search.\n", req.NodeTypes[0].String()) // TODO: Use logger
+			}
+			typePtr := req.NodeTypes[0] // Take the first type
+			searchReq.Type = &typePtr
+		}
+
+		// Call SearchNodes to find the start nodes.
+		// We ignore the 'total' count here.
+		startNodes, _, err := r.SearchNodes(ctx, searchReq)
+		if err != nil {
+			return nil, nil, fmt.Errorf("repo: failed to find start nodes for GetNetwork(Depth 0): %w", err)
+		}
+		// Return only the found start nodes and an empty relation slice.
+		return startNodes, []*network.Relation{}, nil
+	}
+
+	// --- Handle Depth > 0 (Existing Logic) ---
+	// 1. 处理参数和计算默认值
+	var maxDepth int32 = req.Depth // Use the positive depth from the request
+	if maxDepth > 5 {              // 仍然限制最大深度
+		fmt.Printf("WARN: Repo: Requested GetNetwork depth %d > 5, resetting to 5\n", req.Depth) // TODO: Use logger
+		maxDepth = 5                                                                             // Reset to max allowed depth (e.g., 5)
+	}
+
 	var limit int64 = 100 // 默认限制
 	var offset int64 = 0  // 默认偏移
 

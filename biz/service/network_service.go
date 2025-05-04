@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors" // Import errors package
 	"fmt"
+	"strings" // Import strings package
 
 	"labelwall/biz/dal/neo4jdal" // Import for ErrNotFound
 	network "labelwall/biz/model/relationship/network"
@@ -16,9 +17,21 @@ func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return errors.Is(err, neo4jdal.ErrNotFound) ||
+	// Check for specific exported errors
+	if errors.Is(err, neo4jdal.ErrNotFound) ||
 		errors.Is(err, cache.ErrNotFound) ||
-		errors.Is(err, cache.ErrNilValue) // Treat cached nil as not found at service level
+		errors.Is(err, cache.ErrNilValue) {
+		return true
+	}
+	// Check for common error strings indicating not found
+	errStr := err.Error()
+	if strings.Contains(errStr, "Result contains no more records") || // Neo4j driver error for empty result
+		strings.Contains(errStr, "not found for deletion") || // Specific DAL deletion error
+		strings.Contains(errStr, "path not found") { // Specific repo path error
+		return true
+	}
+
+	return false
 }
 
 // NetworkService 定义了关系网络服务的业务逻辑接口

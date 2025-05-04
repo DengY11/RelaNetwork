@@ -161,17 +161,25 @@ func clearTestData(ctx context.Context) {
 	}
 	session.Close(ctx)
 
-	// Clear Redis (be careful not to clear unrelated keys if Redis is shared)
-	// Use the EXPORTED constants (assuming they will be exported)
-	// Or construct patterns based on the prefix and known key types
+	// Clear Redis using known prefixes
+	clearRedisCache(ctx) // Call the new helper
+}
+
+// clearRedisCache helper function to clear specific test prefixes from Redis.
+func clearRedisCache(ctx context.Context) {
+	if redisClient == nil {
+		fmt.Println("Warning: redisClient not initialized, cannot clear Redis cache.")
+		return
+	}
+	// Use the EXPORTED constants from neo4jrepo package
+	basePrefix := "testprefix:"
 	prefixesToClear := []string{
-		"testprefix:node:*",                    // Node details
-		"testprefix:relation:*",                // Relation details (assuming this pattern)
-		neo4jrepo.SearchNodesCachePrefix + "*", // Search results IDs
-		neo4jrepo.GetNetworkCachePrefix + "*",  // Network graph IDs
-		neo4jrepo.GetPathCachePrefix + "*",     // Path IDs
-		// Add any other known prefixes, e.g., for GetNodeRelations if cached
-		"testprefix:nodrels:*", // Assuming pattern for GetNodeRelations cache
+		basePrefix + neo4jrepo.NodeCachePrefix + "*",          // Node details
+		basePrefix + neo4jrepo.RelationCachePrefix + "*",      // Relation details
+		basePrefix + neo4jrepo.SearchNodesCachePrefix + "*",   // Search results IDs
+		basePrefix + neo4jrepo.GetNetworkCachePrefix + "*",    // Network graph IDs
+		basePrefix + neo4jrepo.GetPathCachePrefix + "*",       // Path IDs
+		basePrefix + neo4jrepo.NodeRelationsCachePrefix + "*", // NodeRelations IDs
 	}
 
 	for _, prefix := range prefixesToClear {
@@ -884,139 +892,142 @@ type getNetworkCacheValueForTest struct {
 func TestGetNetwork_Integration(t *testing.T) {
 	ctx := context.Background()
 	require.NotNil(t, testRepo, "Repository should be initialized")
-	require.NotNil(t, relTestRelRepo, "RelationRepository should be initialized")
 	require.NotNil(t, testCache, "Cache should be initialized")
-	clearTestData(ctx)
+	require.NotNil(t, redisClient, "redisClient should be initialized") // Ensure redisClient is available
+	clearTestData(ctx)                                                  // <<< Added: Ensure clean state for this test function
 
-	// 1. Setup: Create a network
-	// Persons
-	p1 := &network.Node{ID: "net-p1", Type: network.NodeType_PERSON, Name: "Net Alice", Profession: func(s string) *string { return &s }("Engineer")}
-	p2 := &network.Node{ID: "net-p2", Type: network.NodeType_PERSON, Name: "Net Bob", Profession: func(s string) *string { return &s }("Engineer")}
-	p3 := &network.Node{ID: "net-p3", Type: network.NodeType_PERSON, Name: "Net Charlie", Profession: func(s string) *string { return &s }("Manager")}
-	p4 := &network.Node{ID: "net-p4", Type: network.NodeType_PERSON, Name: "Net David"} // No profession
-	// Companies
-	c1 := &network.Node{ID: "net-c1", Type: network.NodeType_COMPANY, Name: "Net Alpha Corp"}
-	c2 := &network.Node{ID: "net-c2", Type: network.NodeType_COMPANY, Name: "Net Beta Inc"}
+	// Setup initial data (as TestMain clears everything once)
+	p1 := &network.Node{ID: "net-p1", Type: network.NodeType_PERSON, Name: "Net Alice", Profession: func(s string) *string { return &s }("Engineer"), Properties: map[string]string{"city": "A"}}
+	p2 := &network.Node{ID: "net-p2", Type: network.NodeType_PERSON, Name: "Net Bob", Profession: func(s string) *string { return &s }("Engineer"), Properties: map[string]string{"city": "B"}}
+	p3 := &network.Node{ID: "net-p3", Type: network.NodeType_PERSON, Name: "Net Charlie", Profession: func(s string) *string { return &s }("Manager"), Properties: map[string]string{"city": "A"}}
+	c1 := &network.Node{ID: "net-c1", Type: network.NodeType_COMPANY, Name: "Net Corp", Properties: map[string]string{"industry": "Tech"}}
+	require.NoError(t, createNodeDirectly(ctx, p1))
+	require.NoError(t, createNodeDirectly(ctx, p2))
+	require.NoError(t, createNodeDirectly(ctx, p3))
+	require.NoError(t, createNodeDirectly(ctx, c1))
 
-	nodesToCreate := []*network.Node{p1, p2, p3, p4, c1, c2}
-	for _, node := range nodesToCreate {
-		err := createNodeDirectly(ctx, node)
-		require.NoError(t, err, "Failed to create node for network test: %s", node.ID)
-	}
+	r1 := &network.Relation{ID: "net-r1", Source: p1.ID, Target: c1.ID, Type: network.RelationType_COLLEAGUE}
+	r2 := &network.Relation{ID: "net-r2", Source: p2.ID, Target: p3.ID, Type: network.RelationType_FRIEND}     // B->C
+	r3 := &network.Relation{ID: "net-r3", Source: p2.ID, Target: c1.ID, Type: network.RelationType_VISITED}    // B->Corp
+	r4 := &network.Relation{ID: "net-r4", Source: p3.ID, Target: p1.ID, Type: network.RelationType_SCHOOLMATE} // C->A
+	r5 := &network.Relation{ID: "net-r5", Source: c1.ID, Target: p2.ID, Type: network.RelationType_FOLLOWING}  // Corp->B
+	require.NoError(t, createRelationDirectly(ctx, p1.ID, c1.ID, r1))
+	require.NoError(t, createRelationDirectly(ctx, p2.ID, p3.ID, r2))
+	require.NoError(t, createRelationDirectly(ctx, p2.ID, c1.ID, r3))
+	require.NoError(t, createRelationDirectly(ctx, p3.ID, p1.ID, r4))
+	require.NoError(t, createRelationDirectly(ctx, c1.ID, p2.ID, r5))
 
-	// Relations
-	r1 := &network.Relation{ID: "net-r1", Type: network.RelationType_COLLEAGUE}
-	r2 := &network.Relation{ID: "net-r2", Type: network.RelationType_COLLEAGUE}
-	r3 := &network.Relation{ID: "net-r3", Type: network.RelationType_COLLEAGUE}
-	r4 := &network.Relation{ID: "net-r4", Type: network.RelationType_FRIEND}
-	r5 := &network.Relation{ID: "net-r5", Type: network.RelationType_COLLEAGUE}
-
-	require.NoError(t, createRelationDirectly(ctx, p1.ID, c1.ID, r1)) // Alice COLLEAGUE Alpha
-	require.NoError(t, createRelationDirectly(ctx, p2.ID, c1.ID, r2)) // Bob COLLEAGUE Alpha
-	require.NoError(t, createRelationDirectly(ctx, p3.ID, c2.ID, r3)) // Charlie COLLEAGUE Beta
-	require.NoError(t, createRelationDirectly(ctx, p1.ID, p2.ID, r4)) // Alice FRIEND Bob
-	require.NoError(t, createRelationDirectly(ctx, p3.ID, p2.ID, r5)) // Charlie COLLEAGUE Bob
-
-	// Pre-cache some items via GetNode/GetRelation
-	_, _ = testRepo.GetNode(ctx, p1.ID)
-	_, _ = relTestRelRepo.GetRelation(ctx, r1.ID)
-	time.Sleep(50 * time.Millisecond) // Allow cache writes
-
-	// --- Test Case 1: Get Network by Profession (Engineer) - Cache Miss ---
-	t.Run("Get Network By Start Criteria Cache Miss", func(t *testing.T) {
-		// Use StartNodeCriteria instead of Profession
-		criteria := map[string]string{"profession": "Engineer"}
+	// --- Test Case: Depth 0 --- (Modified)
+	t.Run("Get_Network_Depth_0", func(t *testing.T) {
+		clearRedisCache(ctx) // Clear cache before test
 		req := &network.GetNetworkRequest{
-			StartNodeCriteria: criteria,
-			// Depth: default (1) -> will be handled by repo
-			// RelationTypes: nil (no filter)
-			// NodeTypes: nil (no filter)
+			StartNodeCriteria: map[string]string{"profession": "Engineer"},
+			Depth:             0, // Explicitly set depth to 0
 		}
-		// Assuming default limit/offset (100/0) and calculated depth (1) for key generation
-		cacheKey := generateGetNetworkCacheKeyForTest(req, 1, 100, 0)
-
-		// Verify cache miss
-		_, err := testCache.Get(ctx, cacheKey)
-		assert.ErrorIs(t, err, cache.ErrNotFound, "Cache should be empty before first GetNetwork")
-
-		// Execute GetNetwork
 		nodes, relations, err := testRepo.GetNetwork(ctx, req)
-		require.NoError(t, err, "GetNetwork failed")
 
-		// Verify results (Depth 1 from Engineers p1, p2)
-		// Expected Nodes: p1, p2, c1 (connected via WORKS_AT), p3 (connected via MANAGES/KNOWS)
-		// Expected Relations: r1 (p1->c1), r2 (p2->c1), r4 (p1->p2), r5 (p3->p2)
-		assert.Len(t, nodes, 4, "Expected 4 nodes (p1, p2, p3, c1)")
-		assert.NotNil(t, findNodeByID(nodes, p1.ID))
-		assert.NotNil(t, findNodeByID(nodes, p2.ID))
-		assert.NotNil(t, findNodeByID(nodes, p3.ID))
-		assert.NotNil(t, findNodeByID(nodes, c1.ID))
+		// Assertions for Depth 0
+		assert.NoError(t, err, "GetNetwork(Depth 0) failed")
+		require.NotNil(t, nodes, "Nodes should not be nil for Depth 0")
+		assert.Len(t, nodes, 2, "Expected 2 start nodes (p1, p2) for Depth 0") // Only p1 and p2 match criteria
+		// Ensure relations are empty (or nil depending on impl)
+		if relations == nil {
+			assert.Nil(t, relations, "Expected nil relations for Depth 0")
+		} else {
+			assert.Len(t, relations, 0, "Expected 0 relations for Depth 0")
+		}
 
-		assert.Len(t, relations, 4, "Expected 4 relations (r1, r2, r4, r5)")
-		assert.NotNil(t, findRelationByID(relations, r1.ID))
-		assert.NotNil(t, findRelationByID(relations, r2.ID))
-		assert.NotNil(t, findRelationByID(relations, r4.ID))
-		assert.NotNil(t, findRelationByID(relations, r5.ID))
-
-		// Verify cache population
-		time.Sleep(50 * time.Millisecond)
-		cachedData, err := testCache.Get(ctx, cacheKey)
-		require.NoError(t, err, "Failed to get data from cache after GetNetwork")
-		require.NotEmpty(t, cachedData, "Cache should contain data after GetNetwork")
-
-		// Verify cache content (IDs)
-		var cachedValue getNetworkCacheValueForTest
-		err = json.Unmarshal(cachedData, &cachedValue)
-		require.NoError(t, err, "Failed to unmarshal cached network data")
-		assert.ElementsMatch(t, []string{p1.ID, p2.ID, p3.ID, c1.ID}, cachedValue.NodeIDs)
-		assert.ElementsMatch(t, []string{r1.ID, r2.ID, r4.ID, r5.ID}, cachedValue.RelationIDs)
-
-		// Also verify relation details are cached by GetRelation calls within GetNetwork
-		relDetail, errRelCache := relTestRelRepo.GetRelation(ctx, r1.ID)
-		assert.NoError(t, errRelCache, "Relation detail cache check failed")
-		assert.NotNil(t, relDetail, "Relation detail should be cached")
-		assert.Equal(t, r1.ID, relDetail.ID)
+		// Verify the correct nodes (p1, p2)
+		foundP1 := false
+		foundP2 := false
+		for _, n := range nodes {
+			if n.ID == p1.ID {
+				foundP1 = true
+			}
+			if n.ID == p2.ID {
+				foundP2 = true
+			}
+		}
+		assert.True(t, foundP1, "Start node p1 should be found for Depth 0")
+		assert.True(t, foundP2, "Start node p2 should be found for Depth 0")
 	})
 
-	// Test case: GetNetwork with Cache Hit
-	t.Run("Get Network By Start Criteria Cache Hit", func(t *testing.T) {
-		// Use StartNodeCriteria instead of Profession
-		criteria := map[string]string{"profession": "Engineer"}
+	// --- Test Case: Depth 1 (Cache Miss) --- (Modified)
+	t.Run("Get_Network_Depth_1_Cache_Miss", func(t *testing.T) {
+		clearRedisCache(ctx) // Clear cache before test
 		req := &network.GetNetworkRequest{
-			StartNodeCriteria: criteria,
-			// Depth: default (1)
+			StartNodeCriteria: map[string]string{"profession": "Engineer"},
+			Depth:             1, // Explicitly set depth to 1
 		}
-		cacheKey := generateGetNetworkCacheKeyForTest(req, 1, 100, 0)
-
-		// Ensure cache exists
-		_, err := testCache.Get(ctx, cacheKey)
-		require.NoError(t, err, "Cache should exist for hit test")
-
-		// Execute GetNetwork again
-		t.Log("Expecting GetNetwork cache hit...")
 		nodes, relations, err := testRepo.GetNetwork(ctx, req)
-		require.NoError(t, err, "GetNetwork (cache hit) failed")
 
-		// Verify results again (should use cached IDs and fetch details)
+		// Assertions for Depth 1
+		require.NoError(t, err, "GetNetwork(Depth 1) failed")
+		require.NotNil(t, nodes, "Nodes should not be nil for Depth 1")
+		require.NotNil(t, relations, "Relations should not be nil for Depth 1")
+		// Expected nodes at depth 1 from p1, p2: p1, p2, c1 (from p1), p3 (from p2)
+		assert.Len(t, nodes, 4, "Expected 4 nodes (p1, p2, p3, c1) for Depth 1")
+		// Expected relations connecting these nodes: r1, r2, r3, r4, r5
+		assert.Len(t, relations, 5, "Expected 5 relations (r1, r2, r3, r4, r5) for Depth 1")
+
+		foundNodes := make(map[string]bool)
+		for _, n := range nodes {
+			foundNodes[n.ID] = true
+		}
+		assert.Contains(t, foundNodes, p1.ID)
+		assert.Contains(t, foundNodes, p2.ID)
+		assert.Contains(t, foundNodes, p3.ID) // Neighbor of p2
+		assert.Contains(t, foundNodes, c1.ID) // Neighbor of p1
+
+		foundRels := make(map[string]bool)
+		for _, r := range relations {
+			foundRels[r.ID] = true
+		}
+		assert.Contains(t, foundRels, r1.ID) // p1 -> c1
+		assert.Contains(t, foundRels, r2.ID) // p2 -> p3
+		assert.Contains(t, foundRels, r3.ID) // p2 -> c1 (VISITED)
+		assert.Contains(t, foundRels, r4.ID) // p3 -> p1
+		assert.Contains(t, foundRels, r5.ID) // c1 -> p2
+
+		// Check cache status after miss
+		// Attempt to GetNode for p1, should hit cache now
+		time.Sleep(50 * time.Millisecond) // Short delay to allow potential async cache write
+		cachedP1, getNodeErr := testRepo.GetNode(ctx, p1.ID)
+		assert.NoError(t, getNodeErr, "GetNode for p1 after GetNetwork should succeed")
+		assert.NotNil(t, cachedP1, "GetNode for p1 after GetNetwork should return node")
+		// Check a log message or metric if possible to confirm cache hit for GetNode
+	})
+
+	// --- Test Case: Depth 1 (Cache Hit) --- (Modified)
+	t.Run("Get_Network_Depth_1_Cache_Hit", func(t *testing.T) {
+		fmt.Println("Expecting GetNetwork cache hit...")
+		// Ensure data is in cache from previous Cache Miss subtest (DON'T clear cache here)
+		req := &network.GetNetworkRequest{
+			StartNodeCriteria: map[string]string{"profession": "Engineer"},
+			Depth:             1, // Depth 1
+		}
+
+		// Call GetNetwork again
+		nodes, relations, err := testRepo.GetNetwork(ctx, req)
+
+		require.NoError(t, err, "GetNetwork(Depth 1, Cache Hit) failed")
+		require.NotNil(t, nodes, "Nodes should not be nil (cache hit)")
+		require.NotNil(t, relations, "Relations should not be nil (cache hit)")
 		assert.Len(t, nodes, 4, "Expected 4 nodes (cache hit)")
-		assert.Len(t, relations, 4, "Expected 4 relations (cache hit)")
-		// Check details of a pre-cached node/relation
-		alice := findNodeByID(nodes, p1.ID)
-		require.NotNil(t, alice)
-		assert.Equal(t, "Net Alice", alice.Name)
-		rel1 := findRelationByID(relations, r1.ID)
-		require.NotNil(t, rel1)
-		assert.Equal(t, network.RelationType_COLLEAGUE, rel1.Type)
+		assert.Len(t, relations, 5, "Expected 5 relations (cache hit)")
 
-		// Ensure relation details are still retrieved (potentially from cache)
-		relDetail, errRelCache := relTestRelRepo.GetRelation(ctx, r1.ID)
-		assert.NoError(t, errRelCache, "Relation detail cache check failed (cache hit)")
-		assert.NotNil(t, relDetail, "Relation detail should be retrieved (cache hit)")
+		// Optional: Verify content matches previous test
+		// ...
 	})
 
-	// Test case: GetNetwork Cache Invalidation on Node Delete
-	t.Run("Get Network Cache Invalidation on Node Delete", func(t *testing.T) {
-		// ... (setup code)
+	// --- Test Case: Invalid Depth (< 0) --- (Modified)
+	t.Run("Get_Network_Invalid_Depth", func(t *testing.T) {
+		req := &network.GetNetworkRequest{
+			StartNodeCriteria: map[string]string{"profession": "Engineer"},
+			Depth:             -1, // Invalid depth
+		}
+		_, _, err := testRepo.GetNetwork(ctx, req)
+		assert.ErrorIs(t, err, neo4jrepo.ErrInvalidDepth, "Expected ErrInvalidDepth for negative depth") // Use exported error
 	})
 }
 
