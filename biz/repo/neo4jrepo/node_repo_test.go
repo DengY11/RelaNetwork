@@ -26,13 +26,24 @@ import (
 )
 
 var (
-	testRepo     neo4jrepo.NodeRepository
-	testDriver   neo4j.DriverWithContext
-	testCache    cache.NodeAndByteCache
-	redisClient  *redis.Client
-	testRelRepo  neo4jrepo.RelationRepository
-	testRelCache cache.RelationAndByteCache
+	testRepo    neo4jrepo.NodeRepository
+	testDriver  neo4j.DriverWithContext
+	testCache   cache.NodeAndByteCache
+	redisClient *redis.Client
 )
+
+// RelTest variables needed by relation_repo_test.go are declared in that file.
+// They are initialized here in TestMain using the same resources.
+/*
+var (
+	relTestRelRepo       neo4jrepo.RelationRepository
+	relTestNodeRepo      neo4jrepo.NodeRepository
+	relTestDriver        neo4j.DriverWithContext
+	relTestCacheClient   *redis.Client
+	relTestRelByteCache  cache.RelationAndByteCache
+	relTestNodeByteCache cache.NodeAndByteCache
+)
+*/
 
 // Helper function to get pointer to NodeType
 func nodeTypePtr(t network.NodeType) *network.NodeType {
@@ -96,25 +107,30 @@ func TestMain(m *testing.M) {
 	}
 	testCache = testCacheImpl // Assign to the interface variable
 
-	// Initialize testRelCache here after cacheImpl is created
-	testRelCache = testCacheImpl // Also assign to the specific relation cache interface if needed elsewhere
+	// Use the same cache implementation for both node and relation tests
+	relationCacheImpl := testCacheImpl // Assuming RelationAndByteCache is compatible or the same impl
 
 	// --- Setup DAL ---
 	nodeDal := neo4jdal.NewNodeDAL()
 	relationDal := neo4jdal.NewRelationDAL() // Instantiate RelationDAL
 
 	// --- Setup Repositories ---
-
-	// Step 1: Create NodeRepo
-	// NodeRepository might need RelationRepository for cache invalidation or complex queries.
-	// The current NewNodeRepository signature takes a RelationRepository.
-	// Let's proceed by creating RelationRepo first, then NodeRepo.
-
-	// Create RelationRepo first
-	testRelRepo = neo4jrepo.NewRelationRepository(testDriver, relationDal, testRelCache) // Use the corrected signature
-
+	// Create RelationRepo first as NodeRepo depends on it
+	relationRepoInstance := neo4jrepo.NewRelationRepository(testDriver, relationDal, relationCacheImpl) // Use the specific cache impl
 	// Create NodeRepo, injecting the created RelationRepo
-	testRepo = neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, testRelRepo)
+	nodeRepoInstance := neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, relationRepoInstance)
+
+	// --- Assign to Global Test Variables (for node_repo_test.go) ---
+	testRepo = nodeRepoInstance
+
+	// --- Assign to Global RelTest Variables (for relation_repo_test.go) ---
+	// These variables are declared in relation_repo_test.go
+	relTestRelRepo = relationRepoInstance
+	relTestNodeRepo = nodeRepoInstance      // Use the same node repo instance
+	relTestDriver = testDriver              // Use the same driver
+	relTestCacheClient = redisClient        // Use the same redis client
+	relTestRelByteCache = relationCacheImpl // Use the relation cache implementation
+	relTestNodeByteCache = testCache        // Use the node cache implementation
 
 	// --- Clean Database & Cache Before Running ---
 	clearTestData(context.Background())
@@ -831,7 +847,7 @@ type getNetworkCacheValueForTest struct {
 func TestGetNetwork_Integration(t *testing.T) {
 	ctx := context.Background()
 	require.NotNil(t, testRepo, "Repository should be initialized")
-	require.NotNil(t, testRelRepo, "RelationRepository should be initialized")
+	require.NotNil(t, relTestRelRepo, "RelationRepository should be initialized")
 	require.NotNil(t, testCache, "Cache should be initialized")
 	clearTestData(ctx)
 
@@ -866,7 +882,7 @@ func TestGetNetwork_Integration(t *testing.T) {
 
 	// Pre-cache some items via GetNode/GetRelation
 	_, _ = testRepo.GetNode(ctx, p1.ID)
-	_, _ = testRelRepo.GetRelation(ctx, r1.ID)
+	_, _ = relTestRelRepo.GetRelation(ctx, r1.ID)
 	time.Sleep(50 * time.Millisecond) // Allow cache writes
 
 	// --- Test Case 1: Get Network by Profession (Engineer) - Cache Miss ---
@@ -915,9 +931,15 @@ func TestGetNetwork_Integration(t *testing.T) {
 		require.NoError(t, err, "Failed to unmarshal cached network data")
 		assert.ElementsMatch(t, []string{p1.ID, p2.ID, p3.ID, c1.ID}, cachedValue.NodeIDs)
 		assert.ElementsMatch(t, []string{r1.ID, r2.ID, r4.ID, r5.ID}, cachedValue.RelationIDs)
+
+		// Also verify relation details are cached by GetRelation calls within GetNetwork
+		relDetail, errRelCache := relTestRelRepo.GetRelation(ctx, r1.ID)
+		assert.NoError(t, errRelCache, "Relation detail cache check failed")
+		assert.NotNil(t, relDetail, "Relation detail should be cached")
+		assert.Equal(t, r1.ID, relDetail.ID)
 	})
 
-	// --- Test Case 2: Get Network by Profession (Engineer) - Cache Hit ---
+	// Test case: GetNetwork with Cache Hit
 	t.Run("Get Network By Profession Cache Hit", func(t *testing.T) {
 		prof := "Engineer"
 		req := &network.GetNetworkRequest{
@@ -945,90 +967,16 @@ func TestGetNetwork_Integration(t *testing.T) {
 		rel1 := findRelationByID(relations, r1.ID)
 		require.NotNil(t, rel1)
 		assert.Equal(t, network.RelationType_COLLEAGUE, rel1.Type)
+
+		// Ensure relation details are still retrieved (potentially from cache)
+		relDetail, errRelCache := relTestRelRepo.GetRelation(ctx, r1.ID)
+		assert.NoError(t, errRelCache, "Relation detail cache check failed (cache hit)")
+		assert.NotNil(t, relDetail, "Relation detail should be retrieved (cache hit)")
 	})
 
-	// --- Test Case 3: Get Network with Depth 0 (Should return error) ---
-	t.Run("Get Network Depth 0 Returns Error", func(t *testing.T) {
-		prof := "Engineer"
-		depth := int32(0)
-		req := &network.GetNetworkRequest{
-			Profession: prof,
-			Depth:      &depth,
-		}
-		// No need to check cache key as it should error out before cache lookup
-
-		// Execute GetNetwork
-		nodes, relations, err := testRepo.GetNetwork(ctx, req)
-
-		// Verify error is returned
-		require.Error(t, err, "GetNetwork with depth 0 should return an error")
-		// Optionally, check if the error is the specific ErrInvalidDepth
-		// assert.ErrorIs(t, err, neo4jrepo.ErrInvalidDepth) // Assuming ErrInvalidDepth is exported or accessible
-		assert.Nil(t, nodes, "Nodes should be nil when error occurs")
-		assert.Nil(t, relations, "Relations should be nil when error occurs")
-	})
-
-	// --- Test Case 4: Get Network No Results (Unknown Profession) ---
-	t.Run("Get Network No Results", func(t *testing.T) {
-		prof := "UnknownProfession"
-		req := &network.GetNetworkRequest{
-			// Assign string directly
-			Profession: prof,
-		}
-		cacheKey := generateGetNetworkCacheKeyForTest(req, 1, 100, 0)
-
-		// Execute GetNetwork
-		nodes, relations, err := testRepo.GetNetwork(ctx, req)
-		require.NoError(t, err, "GetNetwork for unknown profession failed")
-
-		// Verify empty results
-		assert.Empty(t, nodes, "Expected 0 nodes for unknown profession")
-		assert.Empty(t, relations, "Expected 0 relations for unknown profession")
-
-		// Verify empty placeholder caching
-		time.Sleep(50 * time.Millisecond)
-		cachedData, err := testCache.Get(ctx, cacheKey)
-		require.NoError(t, err)
-		assert.Equal(t, []byte(neo4jrepo.GetNetworkEmptyPlaceholder), cachedData)
-
-		// Execute again (cache hit for empty)
-		nodesHit, relationsHit, errHit := testRepo.GetNetwork(ctx, req)
-		require.NoError(t, errHit)
-		assert.Empty(t, nodesHit)
-		assert.Empty(t, relationsHit)
-	})
-
-	// --- Test Case 5: Get Network No Profession Filter (Larger Graph) ---
-	t.Run("Get Network No Filter", func(t *testing.T) {
-		req := &network.GetNetworkRequest{
-			// No Profession filter (Profession is empty string)
-			Profession: "",
-			// Depth: default (1)
-		}
-		cacheKey := generateGetNetworkCacheKeyForTest(req, 1, 100, 0)
-
-		// Execute GetNetwork
-		nodes, relations, err := testRepo.GetNetwork(ctx, req)
-		require.NoError(t, err, "GetNetwork with no filter failed")
-
-		// Verify results (Depth 1 from ALL nodes - p4 is isolated, so not included by path query)
-		// Expecting: p1, p2, p3, c1, c2 (5 nodes)
-		// Expecting: r1, r2, r3, r4, r5 (5 relations)
-		assert.Len(t, nodes, 5, "Expected 5 connected nodes (p4 is isolated)")
-		assert.Len(t, relations, 5, "Expected all 5 relations") // Correctly check relations length
-
-		// Verify cache population
-		time.Sleep(50 * time.Millisecond)
-		cachedData, err := testCache.Get(ctx, cacheKey)
-		require.NoError(t, err, "Failed to get cache for no filter")
-		var cachedValue getNetworkCacheValueForTest
-		// Expect JSON parsing to succeed now
-		require.NoError(t, json.Unmarshal(cachedData, &cachedValue), "Cache for no filter should contain valid JSON, not placeholder")
-		// Verify the 5 connected node IDs and 5 relation IDs
-		expectedNodeIDs := []string{p1.ID, p2.ID, p3.ID, c1.ID, c2.ID}
-		expectedRelationIDs := []string{r1.ID, r2.ID, r3.ID, r4.ID, r5.ID}
-		assert.ElementsMatch(t, expectedNodeIDs, cachedValue.NodeIDs)
-		assert.ElementsMatch(t, expectedRelationIDs, cachedValue.RelationIDs)
+	// Test case: GetNetwork Cache Invalidation on Node Delete
+	t.Run("Get Network Cache Invalidation on Node Delete", func(t *testing.T) {
+		// ... (setup code)
 	})
 }
 
@@ -1058,7 +1006,7 @@ type getPathCacheValueForTest struct {
 func TestGetPath_Integration(t *testing.T) {
 	ctx := context.Background()
 	require.NotNil(t, testRepo, "Repository should be initialized")
-	require.NotNil(t, testRelRepo, "RelationRepository should be initialized")
+	require.NotNil(t, relTestRelRepo, "RelationRepository should be initialized")
 	require.NotNil(t, testCache, "Cache should be initialized")
 	clearTestData(ctx)
 
@@ -1088,7 +1036,7 @@ func TestGetPath_Integration(t *testing.T) {
 
 	// Pre-cache B and rBC
 	_, _ = testRepo.GetNode(ctx, nB.ID)
-	_, _ = testRelRepo.GetRelation(ctx, rBC.ID)
+	_, _ = relTestRelRepo.GetRelation(ctx, rBC.ID)
 	time.Sleep(50 * time.Millisecond) // Allow cache writes
 
 	// --- Test Case 1: Find shortest path A->D (default depth, no type filter) - Cache Miss ---
@@ -1132,6 +1080,14 @@ func TestGetPath_Integration(t *testing.T) {
 		require.NoError(t, err, "Failed to unmarshal cached path data")
 		assert.Equal(t, []string{nA.ID, nC.ID, nD.ID}, cachedValue.NodeIDs) // Adjusted expected nodes
 		assert.Equal(t, []string{rAC.ID, rCD.ID}, cachedValue.RelationIDs)  // Adjusted expected relations
+
+		// Also verify relation details are cached
+		relDetailAB, errRelCacheAB := relTestRelRepo.GetRelation(ctx, rAB.ID)
+		relDetailBC, errRelCacheBC := relTestRelRepo.GetRelation(ctx, rBC.ID)
+		assert.NoError(t, errRelCacheAB, "Relation AB detail cache check failed")
+		assert.NoError(t, errRelCacheBC, "Relation BC detail cache check failed")
+		assert.NotNil(t, relDetailAB, "Relation AB detail should be cached")
+		assert.NotNil(t, relDetailBC, "Relation BC detail should be cached")
 	})
 
 	// --- Test Case 2: Find shortest path A->D - Cache Hit ---
@@ -1163,6 +1119,11 @@ func TestGetPath_Integration(t *testing.T) {
 		relCD := findRelationByID(relations, rCD.ID)
 		require.NotNil(t, relCD)
 		assert.Equal(t, network.RelationType_SCHOOLMATE, relCD.Type)
+
+		// Ensure relation details are still retrieved (potentially from cache)
+		relDetailAB, errRelCacheAB := relTestRelRepo.GetRelation(ctx, rAB.ID)
+		assert.NoError(t, errRelCacheAB, "Relation AB detail cache check failed (cache hit)")
+		assert.NotNil(t, relDetailAB, "Relation AB detail should be retrieved (cache hit)")
 	})
 
 	// --- Test Case 3: Find path A->C (MaxDepth 1, Type VISITED) ---

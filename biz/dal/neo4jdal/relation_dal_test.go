@@ -10,6 +10,7 @@ import (
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 )
 
 // 测试 ExecCreateRelation
@@ -72,11 +73,11 @@ func TestNeo4jRelationDAL_ExecGetRelationByID(t *testing.T) {
 
 	t.Run("未找到关系", func(t *testing.T) {
 		mockSession := new(MockSession)
-		// stub returns nil,nil 表示 not found
-		mockSession.On("ExecuteRead", ctx, mock.Anything, mock.Anything).Return(nil, nil).Once()
+		// stub 返回 ErrNotFound
+		mockSession.On("ExecuteRead", ctx, mock.Anything, mock.Anything).Return(nil, ErrNotFound).Once()
 
 		gotRel, gotType, gotSrc, gotDst, err := dal.ExecGetRelationByID(ctx, mockSession, id)
-		assert.NoError(t, err)
+		require.ErrorIs(t, err, ErrNotFound)
 		assert.Equal(t, dbtype.Relationship{}, gotRel)
 		assert.Equal(t, "", gotType)
 		assert.Equal(t, "", gotSrc)

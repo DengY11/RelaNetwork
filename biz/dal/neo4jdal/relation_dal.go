@@ -93,11 +93,11 @@ func (d *neo4jRelationDAL) ExecGetRelationByID(ctx context.Context, session neo4
 		// 获取单个结果。
 		record, err := result.Single(ctx)
 		if err != nil {
-			// 检查是否为"未找到"错误。
-			usageErr := new(neo4j.UsageError)
-			if errors.As(err, &usageErr) && strings.Contains(usageErr.Error(), "result contains no more records") {
-				return nil, nil // 返回 nil, nil 表示未找到。
+			// 更直接地检查 "not found" 错误消息
+			if err != nil && strings.Contains(err.Error(), "Result contains no more records") {
+				return nil, ErrNotFound // 返回导出的 ErrNotFound
 			}
+			// 如果是其他错误，则包装返回
 			return nil, fmt.Errorf("DAL: 获取关系结果失败: %w", err)
 		}
 		// 提取结果字段。
@@ -122,11 +122,16 @@ func (d *neo4jRelationDAL) ExecGetRelationByID(ctx context.Context, session neo4
 	})
 	// 处理事务错误。
 	if err != nil {
+		// 如果错误是 ErrNotFound，直接透传
+		if errors.Is(err, ErrNotFound) {
+			return dbtype.Relationship{}, "", "", "", ErrNotFound
+		}
 		return dbtype.Relationship{}, "", "", "", err
 	}
 	// 处理"未找到"情况。
 	if readResult == nil {
-		return dbtype.Relationship{}, "", "", "", nil // 返回零值和 nil 错误表示未找到。
+		// This case should ideally not be reached if ErrNotFound is returned correctly above.
+		return dbtype.Relationship{}, "", "", "", ErrNotFound // Return ErrNotFound here too for consistency
 	}
 	// 解析结果 map 并返回。
 	resultMap := readResult.(map[string]any)
@@ -225,7 +230,7 @@ func (d *neo4jRelationDAL) ExecDeleteRelation(ctx context.Context, session neo4j
 		// 检查计数器中被删除的关系数量。
 		if summary.Counters().RelationshipsDeleted() == 0 {
 			// 如果没有关系被删除，说明具有该 ID 的关系不存在。
-			return fmt.Errorf("DAL: relation with id '%s' not found for deletion", id)
+			return ErrNotFound // 返回导出的 ErrNotFound
 		}
 		// 关系删除成功。
 		return nil
