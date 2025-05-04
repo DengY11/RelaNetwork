@@ -22,26 +22,36 @@ import (
 )
 
 const (
+	//TODO: 从config读取缓存过期时间
 	// 默认节点缓存时间
 	defaultNodeTTL = 1 * time.Hour
 
-	searchNodesCachePrefix = "search:nodes:ids:"
-	searchNodesCacheTTL    = 5 * time.Minute // 搜索结果缓存 5 分钟
-	// 空搜索结果标记及 TTL (较短，防止长时间缓存无效搜索)
-	searchEmptyPlaceholder = "__EMPTY_SEARCH__"
-	searchEmptyTTL         = 1 * time.Minute
+	// SearchNodesCachePrefix is the prefix for search nodes cache keys
+	SearchNodesCachePrefix = "search:nodes:ids:"
+	// SearchNodesCacheTTL is the TTL for search results cache
+	SearchNodesCacheTTL = 5 * time.Minute // 搜索结果缓存 5 分钟
+	// SearchEmptyPlaceholder marks empty search results
+	SearchEmptyPlaceholder = "__EMPTY_SEARCH__"
+	// SearchEmptyTTL is the TTL for empty search results
+	SearchEmptyTTL = 1 * time.Minute
 
-	getNetworkCachePrefix = "network:graph:ids:"
-	getNetworkCacheTTL    = 10 * time.Minute // 网络图谱缓存 10 分钟 (比搜索长一些)
-	// 空网络图谱结果标记及 TTL
-	getNetworkEmptyPlaceholder = "__EMPTY_NETWORK__"
-	getNetworkEmptyTTL         = 2 * time.Minute
+	// GetNetworkCachePrefix is the prefix for get network cache keys
+	GetNetworkCachePrefix = "network:graph:ids:"
+	// GetNetworkCacheTTL is the TTL for network graph cache
+	GetNetworkCacheTTL = 10 * time.Minute // 网络图谱缓存 10 分钟 (比搜索长一些)
+	// GetNetworkEmptyPlaceholder marks empty network graph results
+	GetNetworkEmptyPlaceholder = "__EMPTY_NETWORK__"
+	// GetNetworkEmptyTTL is the TTL for empty network results
+	GetNetworkEmptyTTL = 2 * time.Minute
 
-	getPathCachePrefix = "network:path:ids:"
-	getPathCacheTTL    = 15 * time.Minute // 路径查询缓存时间可以稍长
-	// 空路径结果标记及 TTL
-	getPathEmptyPlaceholder = "__EMPTY_PATH__"
-	getPathEmptyTTL         = 2 * time.Minute
+	// GetPathCachePrefix is the prefix for get path cache keys
+	GetPathCachePrefix = "network:path:ids:"
+	// GetPathCacheTTL is the TTL for path query cache
+	GetPathCacheTTL = 15 * time.Minute // 路径查询缓存时间可以稍长
+	// GetPathEmptyPlaceholder marks empty path results
+	GetPathEmptyPlaceholder = "__EMPTY_PATH__"
+	// GetPathEmptyTTL is the TTL for empty path results
+	GetPathEmptyTTL = 2 * time.Minute
 )
 
 // neo4jNodeRepo 实现了 NodeRepository 接口
@@ -299,7 +309,7 @@ func generateSearchNodesCacheKey(req *network.SearchNodesRequest) string {
 	nodeTypeStr := req.Type.String()
 
 	// 格式: prefix:keyword_hash:type:limit:offset
-	return fmt.Sprintf("%s%s:%s:%d:%d", searchNodesCachePrefix, keywordHash, nodeTypeStr, limitVal, offsetVal)
+	return fmt.Sprintf("%s%s:%s:%d:%d", SearchNodesCachePrefix, keywordHash, nodeTypeStr, limitVal, offsetVal)
 }
 
 // SearchNodes 搜索节点 (带缓存)
@@ -317,7 +327,7 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 	cachedData, err := r.cache.Get(ctx, cacheKey)
 	if err == nil { // 缓存命中
 		// 2.0 检查是否是空结果标记
-		if bytes.Equal(cachedData, []byte(searchEmptyPlaceholder)) {
+		if bytes.Equal(cachedData, []byte(SearchEmptyPlaceholder)) {
 			fmt.Printf("INFO: Repo: SearchNodes 缓存命中空标记 (Key: %s)\n", cacheKey) // TODO: 使用日志库
 			return []*network.Node{}, 0, nil                                    // 返回空结果
 		}
@@ -380,7 +390,7 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 		if err := json.NewEncoder(&buffer).Encode(cacheValue); err == nil {
 			// 设置缓存，忽略 Set 的错误 (只记录日志)
 			// 使用通用的 Set
-			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), searchNodesCacheTTL)
+			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), SearchNodesCacheTTL)
 			if setErr != nil {
 				fmt.Printf("ERROR: Repo: SearchNodes 缓存写入失败 (Key: %s): %v\n", cacheKey, setErr) // TODO: 使用日志库
 			} else {
@@ -391,7 +401,7 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 		}
 	} else if err == nil && len(resultNodes) == 0 {
 		// 4.1 缓存空结果标记
-		setErr := r.cache.Set(ctx, cacheKey, []byte(searchEmptyPlaceholder), searchEmptyTTL)
+		setErr := r.cache.Set(ctx, cacheKey, []byte(SearchEmptyPlaceholder), SearchEmptyTTL)
 		if setErr != nil {
 			fmt.Printf("ERROR: Repo: SearchNodes 缓存空标记写入失败 (Key: %s): %v\n", cacheKey, setErr) // TODO: 使用日志库
 		} else {
@@ -467,7 +477,7 @@ func generateGetNetworkCacheKey(req *network.GetNetworkRequest, maxDepth int32, 
 	// 包含 Profession (可能为空), maxDepth, limit, offset
 	// 使用 Profession 值本身，如果可能很长或包含特殊字符，可以考虑哈希
 	profession := req.Profession // Profession 是 string 类型
-	return fmt.Sprintf("%s%s:%d:%d:%d", getNetworkCachePrefix, profession, maxDepth, limit, offset)
+	return fmt.Sprintf("%s%s:%d:%d:%d", GetNetworkCachePrefix, profession, maxDepth, limit, offset)
 }
 
 // GetNetwork 获取网络图谱 (节点和关系)，带缓存
@@ -497,7 +507,7 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 	cachedData, err := r.cache.Get(ctx, cacheKey)
 	if err == nil { // 缓存命中
 		// 4.1 检查空标记
-		if bytes.Equal(cachedData, []byte(getNetworkEmptyPlaceholder)) {
+		if bytes.Equal(cachedData, []byte(GetNetworkEmptyPlaceholder)) {
 			fmt.Printf("INFO: Repo: GetNetwork cache hit empty placeholder (Key: %s)\n", cacheKey) // TODO: Use logger
 			return []*network.Node{}, []*network.Relation{}, nil
 		}
@@ -569,7 +579,7 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 	if err == nil {
 		if len(dbNodes) == 0 && len(dbRelations) == 0 {
 			// 6.1 缓存空标记
-			setErr := r.cache.Set(ctx, cacheKey, []byte(getNetworkEmptyPlaceholder), getNetworkEmptyTTL)
+			setErr := r.cache.Set(ctx, cacheKey, []byte(GetNetworkEmptyPlaceholder), GetNetworkEmptyTTL)
 			if setErr != nil {
 				fmt.Printf("ERROR: Repo: GetNetwork cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
 			} else {
@@ -596,7 +606,7 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 			}
 			var buffer bytes.Buffer
 			if err := json.NewEncoder(&buffer).Encode(cacheValue); err == nil {
-				setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), getNetworkCacheTTL)
+				setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), GetNetworkCacheTTL)
 				if setErr != nil {
 					fmt.Printf("ERROR: Repo: GetNetwork cache set failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
 				} else {
@@ -699,7 +709,7 @@ func generateGetPathCacheKey(req *network.GetPathRequest, maxDepth int32, relati
 	typesHash := hex.EncodeToString(hasher.Sum(nil))
 
 	// 格式: prefix:sourceID:targetID:maxDepth:typesHash
-	return fmt.Sprintf("%s%s:%s:%d:%s", getPathCachePrefix, req.SourceID, req.TargetID, maxDepth, typesHash)
+	return fmt.Sprintf("%s%s:%s:%d:%s", GetPathCachePrefix, req.SourceID, req.TargetID, maxDepth, typesHash)
 }
 
 // GetPath 获取两个节点之间的最短路径 (带缓存)
@@ -734,7 +744,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 	cachedData, err := r.cache.Get(ctx, cacheKey)
 	if err == nil { // 缓存命中
 		// 4.1 检查空标记
-		if bytes.Equal(cachedData, []byte(getPathEmptyPlaceholder)) {
+		if bytes.Equal(cachedData, []byte(GetPathEmptyPlaceholder)) {
 			fmt.Printf("INFO: Repo: GetPath cache hit empty placeholder (Key: %s)\n", cacheKey) // TODO: Use logger
 			// 路径未找到，根据接口约定，可能需要返回特定错误而非空列表
 			// return []*network.Node{}, []*network.Relation{}, nil // 或者返回原始的 not found 错误?
@@ -801,7 +811,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 	if err != nil {
 		// 5.1 如果是路径未找到错误，缓存空标记
 		if isNotFoundError(err) { // 检查是否是 DAL 返回的 Not Found
-			setErr := r.cache.Set(ctx, cacheKey, []byte(getPathEmptyPlaceholder), getPathEmptyTTL)
+			setErr := r.cache.Set(ctx, cacheKey, []byte(GetPathEmptyPlaceholder), GetPathEmptyTTL)
 			if setErr != nil {
 				fmt.Printf("ERROR: Repo: GetPath cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
 			} else {
@@ -844,7 +854,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 		}
 		var buffer bytes.Buffer
 		if encErr := json.NewEncoder(&buffer).Encode(cacheValue); encErr == nil {
-			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), getPathCacheTTL)
+			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), GetPathCacheTTL)
 			if setErr != nil {
 				fmt.Printf("ERROR: Repo: GetPath cache set failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
 			} else {
