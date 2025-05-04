@@ -241,10 +241,10 @@ struct Relation {
 #### 5.1.5 搜索节点
 
 - **端点**: `GET /api/v1/nodes/search`
-- **描述**: 根据关键词搜索节点
+- **描述**: 根据条件搜索节点
 - **查询参数**:
-    - `keyword` - 搜索关键词
-    - `type` - 可选，节点类型
+    - `criteria` - 可选, 搜索条件map (e.g., `criteria[name]=张`, `criteria[profession]=工程师`)。后端将对提供的 value 进行模糊匹配或精确匹配（具体取决于实现）。键必须是节点属性名。
+    - `type` - 可选，节点类型 (`1`=PERSON, `2`=COMPANY, `3`=SCHOOL)
     - `limit` - 可选，返回结果数量限制
     - `offset` - 可选，分页偏移量
 - **响应**:
@@ -268,7 +268,7 @@ struct Relation {
         "profession": "设计师"
       }
     ],
-    "total": 2
+    "total": 2 // 匹配到的总节点数
   }
   ```
 
@@ -420,15 +420,15 @@ struct Relation {
 
 ### 5.3 网络查询 API
 
-#### 5.3.1 职业网络查询
+#### 5.3.1 网络查询
 
 - **端点**: `GET /api/v1/network`
-- **描述**: 根据职业查询相关节点及其关系网络
+- **描述**: 根据起始节点条件查询相关节点及其关系网络
 - **查询参数**:
-    - `profession` - 职业名称
-    - `depth` - 可选，查询深度，默认为1
-    - `limit` - 可选，返回结果数量限制
-    - `offset` - 可选，分页偏移量
+    - `startNodeCriteria` - 可选, 用于查找起始节点的条件 map (e.g., `startNodeCriteria[profession]=工程师`, `startNodeCriteria[id]=node123`)。
+    - `depth` - 可选，从起始节点扩展的查询深度，默认为1。`0` 表示只返回起始节点。负数无效。
+    - `relationTypes` - 可选, 关系类型列表 (e.g., `1,3`)，用于过滤遍历的关系。
+    - `nodeTypes` - 可选, 节点类型列表 (e.g., `1,2`)，用于过滤最终结果中的节点。
 - **响应**:
   ```json
   {
@@ -446,6 +446,11 @@ struct Relation {
         "type": 1,
         "name": "李四",
         "profession": "工程师"
+      },
+      {
+         "id": "node789",
+         "type": 2,
+         "name": "ABC公司"
       }
     ],
     "relations": [
@@ -455,6 +460,13 @@ struct Relation {
         "target": "node456",
         "type": 1,
         "label": "同事"
+      },
+      {
+        "id": "rel179",
+        "source": "node123",
+        "target": "node789",
+        "type": 1,
+        "label": "前同事"
       }
     ]
   }
@@ -468,7 +480,7 @@ struct Relation {
     - `source_id` - 起始节点ID
     - `target_id` - 目标节点ID
     - `max_depth` - 可选，最大查询深度，默认为3
-    - `rel_types` - 可选，关系类型列表，以逗号分隔
+    - `types` - 可选，关系类型列表 (e.g., `1,3`)，用于筛选路径中允许的关系类型。
 - **响应**:
   ```json
   {
@@ -597,7 +609,7 @@ func CreateNode(ctx context.Context, c *app.RequestContext) {
 
 - **索引优化**: 对 Neo4j 中的节点和关系的关键属性（如 `id`, `name`）建立索引，加速查找和匹配操作。
 - **查询优化**: 编写高效的 Cypher 查询语句，避免全图扫描，利用索引和数据库特性。
-- **分页查询**: 所有返回列表的 API（如 `SearchNodes`, `GetNodeRelations`）均支持分页参数 (`limit`, `offset`)，控制单次返回的数据量，减少网络传输和内存消耗。
+- **分页查询**: 所有返回列表的 API（如 `SearchNodes`, `GetNetwork, GetPath, GetNodeRelations`）均支持分页参数 (`limit`, `offset`)，控制单次返回的数据量，减少网络传输和内存消耗。
 - **连接池管理**: 配置合理的 Neo4j 驱动连接池大小，平衡并发请求和资源消耗。
 - **缓存策略**: (见下文详细说明)
 
@@ -817,7 +829,7 @@ LabelWall 关系网络服务提供了一个完整的解决方案，用于管理�
 | 获取节点 | GET | /api/v1/nodes/:id | 获取节点详情 |
 | 更新节点 | PUT | /api/v1/nodes/:id | 更新节点信息 |
 | 删除节点 | DELETE | /api/v1/nodes/:id | 删除节点 |
-| 搜索节点 | GET | /api/v1/nodes/search | 搜索节点 |
+| 搜索节点 | GET | /api/v1/nodes/search | 按条件搜索节点 |
 | **关系管理** | | | |
 | 创建关系 | POST | /api/v1/relations | 创建节点关系 |
 | 获取关系 | GET | /api/v1/relations/:id | 获取关系详情 |
@@ -825,5 +837,5 @@ LabelWall 关系网络服务提供了一个完整的解决方案，用于管理�
 | 删除关系 | DELETE | /api/v1/relations/:id | 删除关系 |
 | 获取节点关系 | GET | /api/v1/nodes/:node_id/relations | 获取节点所有关系 |
 | **网络查询** | | | |
-| 网络查询 | GET | /api/v1/network | 按职业查询关系网络 |
+| 网络查询 | GET | /api/v1/network | 按起始条件查询关系网络 |
 | 路径查询 | GET | /api/v1/path | 查询节点间关系路径 |
