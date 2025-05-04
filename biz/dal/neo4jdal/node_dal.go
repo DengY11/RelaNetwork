@@ -135,8 +135,8 @@ func (d *neo4jNodeDAL) ExecUpdateNode(ctx context.Context, session neo4j.Session
 
 	// 使用 ExecuteWrite 在事务中执行写操作
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		// 1. 检查节点是否存在 (这一步在事务内执行可能不是最佳实践，但保持原逻辑)
-		// 更好的做法可能是在调用 ExecUpdateNode 之前由 Repo 层检查，或者允许更新操作本身在节点不存在时静默失败或由 Cypher 处理
+		// 1. 检查节点是否存在
+		// 现在已改为调用 ExecUpdateNode 之前由 Repo 层检查，或者允许更新操作本身在节点不存在时静默失败或由 Cypher 处理
 		/* // 暂时注释掉内部的存在性检查，依赖 Cypher 的 MATCH 行为
 		existsQuery := "MATCH (n{id: $id}) RETURN count(n) AS cnt"
 		existsResult, err := tx.Run(ctx, existsQuery, map[string]any{"id": id})
