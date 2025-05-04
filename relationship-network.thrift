@@ -187,8 +187,10 @@ struct GetNodeRelationsResponse {
 
 // 网络查询请求
 struct GetNetworkRequest {
-    1: string profession         // 按职业筛选
-    2: optional i32 depth        // 查询深度
+    1: optional map<string, string> startNodeCriteria // (替换 profession) 用于查找起始节点的条件
+    2: optional i32 depth = 1                       // 从起始节点扩展的深度
+    3: optional list<RelationType> relationTypes    // 要包含/遍历的关系类型过滤器
+    4: optional list<NodeType> nodeTypes            // 最终结果中要包含的节点类型过滤器
 }
 
 // 网络查询响应

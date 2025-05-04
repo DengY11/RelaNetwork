@@ -403,10 +403,14 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 }
 
 // ExecGetNetwork 执行网络查询的 Cypher。
-// 根据职业和深度查询相关节点和关系。
-// TODO：此查询可能返回大量数据，建议在调用层或 API 设计中加入限制。
-// TODO: config文件应该包含depth配置
-func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.SessionWithContext, profession string, depth int32, limit, offset int64) ([]neo4j.Node, []neo4j.Relationship, error) {
+// 根据起始节点条件、深度、关系类型和节点类型查询相关节点和关系。
+func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.SessionWithContext,
+	startNodeCriteria map[string]string,
+	depth int32,
+	limit, offset int64,
+	relationTypes []network.RelationType,
+	nodeTypes []network.NodeType,
+) ([]neo4j.Node, []neo4j.Relationship, error) {
 	var nodes []neo4j.Node
 	var relationships []neo4j.Relationship
 
@@ -416,34 +420,66 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 	}
 
 	readResult, err := session.ExecuteRead(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
-		// REMOVE unused declarations inside the transaction function
-		/*
-			// 使用 map 存储节点和关系，确保唯一性
-			var nodes = make([]neo4j.Node, 0)
-			var relationships = make([]neo4j.Relationship, 0)
-		*/
-
-		// Dynamically build the initial MATCH clause based on profession
-		var matchClause string
+		var queryBuilder strings.Builder
 		params := map[string]any{
-			// Parameters needed regardless of the match clause
 			"offset": offset,
 			"limit":  limit,
+			// RelationTypes and NodeTypes will be handled in WHERE if needed
 		}
 
-		if profession != "" {
-			// If profession is provided, match PERSON nodes with that profession
-			matchClause = "MATCH path = (startNode:PERSON {profession: $profession})-[*1..%d]-(neighbor)"
-			params["profession"] = profession
+		// Build MATCH clause for startNode based on criteria
+		queryBuilder.WriteString("MATCH (startNode)")
+		startWhereClauses := []string{}
+		if len(startNodeCriteria) > 0 {
+			i := 0
+			for key, value := range startNodeCriteria {
+				if key != "" && value != "" {
+					paramName := fmt.Sprintf("start_%s", key)
+					startWhereClauses = append(startWhereClauses, fmt.Sprintf("startNode.%s = $%s", key, paramName))
+					params[paramName] = value
+					i++
+				}
+			}
+		}
+		if len(startWhereClauses) > 0 {
+			queryBuilder.WriteString(" WHERE ")
+			queryBuilder.WriteString(strings.Join(startWhereClauses, " AND "))
 		} else {
-			// If profession is empty, match any node as startNode
-			matchClause = "MATCH path = (startNode)-[*1..%d]-(neighbor)"
+			// If no criteria, maybe return error or match any node? For now, let it match any.
+			// This could be inefficient. Consider requiring start criteria.
 		}
 
-		// Combine clauses
-		// Warning: UNWIND and collect before slicing can be memory intensive for large graphs!
-		query := fmt.Sprintf(`
-			%s
+		// Build the path MATCH and WHERE clause for types
+		queryBuilder.WriteString(fmt.Sprintf(" MATCH path = (startNode)-[*1..%d]-(neighbor)", depth))
+
+		whereClauses := []string{}
+		// Filter by relation types
+		if len(relationTypes) > 0 {
+			relTypeStrings := make([]string, len(relationTypes))
+			for i, rt := range relationTypes {
+				relTypeStrings[i] = rt.String()
+			}
+			whereClauses = append(whereClauses, "ALL(r IN relationships(path) WHERE type(r) IN $relTypes)")
+			params["relTypes"] = relTypeStrings
+		}
+
+		// Filter by node types (apply to all nodes in the path, including start/end)
+		if len(nodeTypes) > 0 {
+			nodeTypeStrings := make([]string, len(nodeTypes))
+			for i, nt := range nodeTypes {
+				nodeTypeStrings[i] = nt.String()
+			}
+			whereClauses = append(whereClauses, "ALL(n IN nodes(path) WHERE ANY(lbl IN labels(n) WHERE lbl IN $nodeTypes))")
+			params["nodeTypes"] = nodeTypeStrings
+		}
+
+		if len(whereClauses) > 0 {
+			queryBuilder.WriteString(" WHERE ")
+			queryBuilder.WriteString(strings.Join(whereClauses, " AND "))
+		}
+
+		// Final part of the query to collect and paginate
+		queryBuilder.WriteString(`
 			WITH path
 			UNWIND nodes(path) as n
 			UNWIND relationships(path) as r
@@ -451,34 +487,31 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 			RETURN
 				CASE size(all_nodes) > $offset WHEN true THEN all_nodes[$offset..$offset+$limit] ELSE [] END AS nodes,
 				CASE size(all_rels) > $offset WHEN true THEN all_rels[$offset..$offset+$limit] ELSE [] END AS relations
-		`, fmt.Sprintf(matchClause, depth)) // Apply depth format to the chosen matchClause
+		`)
+
+		query := queryBuilder.String()
 
 		result, err := tx.Run(ctx, query, params)
 		if err != nil {
 			return nil, fmt.Errorf("DAL: 运行 GetNetwork 查询失败: %w", err)
 		}
 
-		record, err := result.Single(ctx) // 期望返回一行包含 nodes 和 relations 列表
+		record, err := result.Single(ctx)
 		if err != nil {
-			// 检查是否因为没有找到起始节点而无结果
 			usageErr := new(neo4j.UsageError)
 			if errors.As(err, &usageErr) && strings.Contains(usageErr.Error(), "result contains no more records") {
-				// 没有找到匹配职业的节点，返回空结果
+				// No matching path found based on criteria/types
 				return map[string]any{"nodes": nodes, "rels": relationships}, nil
 			}
 			return nil, fmt.Errorf("DAL: 获取 GetNetwork 结果失败: %w", err)
 		}
 
-		// 提取节点列表
+		// Extract node and relation lists (rest of the parsing logic remains similar)
 		nodesInterface, nodesOk := record.Get("nodes")
-		// 提取关系列表
 		relsInterface, relsOk := record.Get("relations")
-
 		if !nodesOk || !relsOk {
 			return nil, fmt.Errorf("DAL: GetNetwork 查询返回结果缺少 'nodes' 或 'relations' 字段")
 		}
-
-		// 类型断言和转换节点列表
 		nodesRaw, ok := nodesInterface.([]any)
 		if !ok {
 			return nil, fmt.Errorf("DAL: 无法将 'nodes' 断言为 []any")
@@ -491,8 +524,6 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 			}
 			nodes[i] = node
 		}
-
-		// 类型断言和转换关系列表
 		relsRaw, ok := relsInterface.([]any)
 		if !ok {
 			return nil, fmt.Errorf("DAL: 无法将 'relations' 断言为 []any")
@@ -506,15 +537,13 @@ func (d *neo4jNodeDAL) ExecGetNetwork(ctx context.Context, session neo4j.Session
 			relationships[i] = rel
 		}
 
-		// Return the results in a map for the outer function to process
-		return map[string]any{"nodes": nodes, "rels": relationships}, nil // Use the locally parsed 'nodes' and 'relationships'
+		return map[string]any{"nodes": nodes, "rels": relationships}, nil
 	})
 
 	if err != nil {
-		return nil, nil, err // 返回事务错误
+		return nil, nil, err
 	}
 
-	// 解析事务返回的 map
 	resultMap := readResult.(map[string]any)
 	finalNodes := resultMap["nodes"].([]neo4j.Node)
 	finalRels := resultMap["rels"].([]neo4j.Relationship)

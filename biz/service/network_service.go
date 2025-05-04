@@ -156,7 +156,8 @@ func (s *networkService) GetNodeRelations(ctx context.Context, req *network.GetN
 // GetNetwork 处理网络查询的业务逻辑
 func (s *networkService) GetNetwork(ctx context.Context, req *network.GetNetworkRequest) (*network.GetNetworkResponse, error) {
 	// TODO: 实现 GetNetwork 业务逻辑，调用 s.nodeRepo.GetNetwork
-	fmt.Printf("TODO: Service 实现 GetNetwork, profession: %s\n", req.Profession)
+	// 使用新的请求字段
+	fmt.Printf("TODO: Service 实现 GetNetwork, startNodeCriteria: %v, depth: %v\n", req.StartNodeCriteria, req.Depth) // 使用 StartNodeCriteria 和 Depth
 	return nil, fmt.Errorf("Service: GetNetwork 未实现")
 }
 

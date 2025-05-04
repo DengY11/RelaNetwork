@@ -829,13 +829,49 @@ func findRelationByID(relations []*network.Relation, id string) *network.Relatio
 
 // Helper function to generate cache key for GetNetwork (mirroring repo logic)
 func generateGetNetworkCacheKeyForTest(req *network.GetNetworkRequest, maxDepth int32, limit, offset int64) string {
-	// Mirror the logic from neo4jNodeRepo.generateGetNetworkCacheKey
-	profession := ""
-	// GetNetworkRequest uses Profession field which is string, not *string
-	if req.Profession != "" {
-		profession = req.Profession
+	// Mirror the logic from neo4jNodeRepo.generateGetNetworkCacheKey (updated)
+	criteriaKeys := make([]string, 0, len(req.StartNodeCriteria))
+	for k := range req.StartNodeCriteria {
+		criteriaKeys = append(criteriaKeys, k)
 	}
-	return fmt.Sprintf("%s%s:%d:%d:%d", neo4jrepo.GetNetworkCachePrefix, profession, maxDepth, limit, offset)
+	sort.Strings(criteriaKeys)
+
+	var criteriaBuilder strings.Builder
+	for i, k := range criteriaKeys {
+		if i > 0 {
+			criteriaBuilder.WriteString("|")
+		}
+		criteriaBuilder.WriteString(k)
+		criteriaBuilder.WriteString("=")
+		criteriaBuilder.WriteString(req.StartNodeCriteria[k])
+	}
+	criteriaStr := criteriaBuilder.String()
+
+	relTypesStr := make([]string, 0, len(req.RelationTypes))
+	if req.IsSetRelationTypes() {
+		for _, rt := range req.RelationTypes {
+			relTypesStr = append(relTypesStr, rt.String())
+		}
+	}
+	sort.Strings(relTypesStr)
+	relTypesKeyPart := strings.Join(relTypesStr, ",")
+
+	nodeTypesStr := make([]string, 0, len(req.NodeTypes))
+	if req.IsSetNodeTypes() {
+		for _, nt := range req.NodeTypes {
+			nodeTypesStr = append(nodeTypesStr, nt.String())
+		}
+	}
+	sort.Strings(nodeTypesStr)
+	nodeTypesKeyPart := strings.Join(nodeTypesStr, ",")
+
+	hasher := sha1.New()
+	hasher.Write([]byte(criteriaStr))
+	hasher.Write([]byte(relTypesKeyPart))
+	hasher.Write([]byte(nodeTypesKeyPart))
+	combinedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	return fmt.Sprintf("%s%s:%d:%d:%d", neo4jrepo.GetNetworkCachePrefix, combinedHash, maxDepth, limit, offset)
 }
 
 // Define a local struct matching the unexported one for unmarshalling cache data
@@ -886,14 +922,16 @@ func TestGetNetwork_Integration(t *testing.T) {
 	time.Sleep(50 * time.Millisecond) // Allow cache writes
 
 	// --- Test Case 1: Get Network by Profession (Engineer) - Cache Miss ---
-	t.Run("Get Network By Profession Cache Miss", func(t *testing.T) {
-		prof := "Engineer"
+	t.Run("Get Network By Start Criteria Cache Miss", func(t *testing.T) {
+		// Use StartNodeCriteria instead of Profession
+		criteria := map[string]string{"profession": "Engineer"}
 		req := &network.GetNetworkRequest{
-			// Assign string directly, not pointer
-			Profession: prof,
-			// Depth: default (1)
+			StartNodeCriteria: criteria,
+			// Depth: default (1) -> will be handled by repo
+			// RelationTypes: nil (no filter)
+			// NodeTypes: nil (no filter)
 		}
-		// Assuming default limit/offset (100/0) for key generation
+		// Assuming default limit/offset (100/0) and calculated depth (1) for key generation
 		cacheKey := generateGetNetworkCacheKeyForTest(req, 1, 100, 0)
 
 		// Verify cache miss
@@ -940,11 +978,12 @@ func TestGetNetwork_Integration(t *testing.T) {
 	})
 
 	// Test case: GetNetwork with Cache Hit
-	t.Run("Get Network By Profession Cache Hit", func(t *testing.T) {
-		prof := "Engineer"
+	t.Run("Get Network By Start Criteria Cache Hit", func(t *testing.T) {
+		// Use StartNodeCriteria instead of Profession
+		criteria := map[string]string{"profession": "Engineer"}
 		req := &network.GetNetworkRequest{
-			// Assign string directly
-			Profession: prof,
+			StartNodeCriteria: criteria,
+			// Depth: default (1)
 		}
 		cacheKey := generateGetNetworkCacheKeyForTest(req, 1, 100, 0)
 

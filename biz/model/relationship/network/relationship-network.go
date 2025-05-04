@@ -6208,39 +6208,84 @@ func (p *GetNodeRelationsResponse) String() string {
 
 // 网络查询请求
 type GetNetworkRequest struct {
-	// 按职业筛选
-	Profession string `thrift:"profession,1" form:"profession" json:"profession" query:"profession"`
-	// 查询深度
-	Depth *int32 `thrift:"depth,2,optional" form:"depth" json:"depth,omitempty" query:"depth"`
+	// (替换 profession) 用于查找起始节点的条件
+	StartNodeCriteria map[string]string `thrift:"startNodeCriteria,1,optional" form:"startNodeCriteria" json:"startNodeCriteria,omitempty" query:"startNodeCriteria"`
+	// 从起始节点扩展的深度
+	Depth int32 `thrift:"depth,2,optional" form:"depth" json:"depth,omitempty" query:"depth"`
+	// 要包含/遍历的关系类型过滤器
+	RelationTypes []RelationType `thrift:"relationTypes,3,optional" form:"relationTypes" json:"relationTypes,omitempty" query:"relationTypes"`
+	// 最终结果中要包含的节点类型过滤器
+	NodeTypes []NodeType `thrift:"nodeTypes,4,optional" form:"nodeTypes" json:"nodeTypes,omitempty" query:"nodeTypes"`
 }
 
 func NewGetNetworkRequest() *GetNetworkRequest {
-	return &GetNetworkRequest{}
+	return &GetNetworkRequest{
+
+		Depth: 1,
+	}
 }
 
 func (p *GetNetworkRequest) InitDefault() {
+	p.Depth = 1
 }
 
-func (p *GetNetworkRequest) GetProfession() (v string) {
-	return p.Profession
+var GetNetworkRequest_StartNodeCriteria_DEFAULT map[string]string
+
+func (p *GetNetworkRequest) GetStartNodeCriteria() (v map[string]string) {
+	if !p.IsSetStartNodeCriteria() {
+		return GetNetworkRequest_StartNodeCriteria_DEFAULT
+	}
+	return p.StartNodeCriteria
 }
 
-var GetNetworkRequest_Depth_DEFAULT int32
+var GetNetworkRequest_Depth_DEFAULT int32 = 1
 
 func (p *GetNetworkRequest) GetDepth() (v int32) {
 	if !p.IsSetDepth() {
 		return GetNetworkRequest_Depth_DEFAULT
 	}
-	return *p.Depth
+	return p.Depth
+}
+
+var GetNetworkRequest_RelationTypes_DEFAULT []RelationType
+
+func (p *GetNetworkRequest) GetRelationTypes() (v []RelationType) {
+	if !p.IsSetRelationTypes() {
+		return GetNetworkRequest_RelationTypes_DEFAULT
+	}
+	return p.RelationTypes
+}
+
+var GetNetworkRequest_NodeTypes_DEFAULT []NodeType
+
+func (p *GetNetworkRequest) GetNodeTypes() (v []NodeType) {
+	if !p.IsSetNodeTypes() {
+		return GetNetworkRequest_NodeTypes_DEFAULT
+	}
+	return p.NodeTypes
 }
 
 var fieldIDToName_GetNetworkRequest = map[int16]string{
-	1: "profession",
+	1: "startNodeCriteria",
 	2: "depth",
+	3: "relationTypes",
+	4: "nodeTypes",
+}
+
+func (p *GetNetworkRequest) IsSetStartNodeCriteria() bool {
+	return p.StartNodeCriteria != nil
 }
 
 func (p *GetNetworkRequest) IsSetDepth() bool {
-	return p.Depth != nil
+	return p.Depth != GetNetworkRequest_Depth_DEFAULT
+}
+
+func (p *GetNetworkRequest) IsSetRelationTypes() bool {
+	return p.RelationTypes != nil
+}
+
+func (p *GetNetworkRequest) IsSetNodeTypes() bool {
+	return p.NodeTypes != nil
 }
 
 func (p *GetNetworkRequest) Read(iprot thrift.TProtocol) (err error) {
@@ -6262,7 +6307,7 @@ func (p *GetNetworkRequest) Read(iprot thrift.TProtocol) (err error) {
 
 		switch fieldId {
 		case 1:
-			if fieldTypeId == thrift.STRING {
+			if fieldTypeId == thrift.MAP {
 				if err = p.ReadField1(iprot); err != nil {
 					goto ReadFieldError
 				}
@@ -6272,6 +6317,22 @@ func (p *GetNetworkRequest) Read(iprot thrift.TProtocol) (err error) {
 		case 2:
 			if fieldTypeId == thrift.I32 {
 				if err = p.ReadField2(iprot); err != nil {
+					goto ReadFieldError
+				}
+			} else if err = iprot.Skip(fieldTypeId); err != nil {
+				goto SkipFieldError
+			}
+		case 3:
+			if fieldTypeId == thrift.LIST {
+				if err = p.ReadField3(iprot); err != nil {
+					goto ReadFieldError
+				}
+			} else if err = iprot.Skip(fieldTypeId); err != nil {
+				goto SkipFieldError
+			}
+		case 4:
+			if fieldTypeId == thrift.LIST {
+				if err = p.ReadField4(iprot); err != nil {
 					goto ReadFieldError
 				}
 			} else if err = iprot.Skip(fieldTypeId); err != nil {
@@ -6307,25 +6368,89 @@ ReadStructEndError:
 }
 
 func (p *GetNetworkRequest) ReadField1(iprot thrift.TProtocol) error {
-
-	var _field string
-	if v, err := iprot.ReadString(); err != nil {
+	_, _, size, err := iprot.ReadMapBegin()
+	if err != nil {
 		return err
-	} else {
-		_field = v
 	}
-	p.Profession = _field
+	_field := make(map[string]string, size)
+	for i := 0; i < size; i++ {
+		var _key string
+		if v, err := iprot.ReadString(); err != nil {
+			return err
+		} else {
+			_key = v
+		}
+
+		var _val string
+		if v, err := iprot.ReadString(); err != nil {
+			return err
+		} else {
+			_val = v
+		}
+
+		_field[_key] = _val
+	}
+	if err := iprot.ReadMapEnd(); err != nil {
+		return err
+	}
+	p.StartNodeCriteria = _field
 	return nil
 }
 func (p *GetNetworkRequest) ReadField2(iprot thrift.TProtocol) error {
 
-	var _field *int32
+	var _field int32
 	if v, err := iprot.ReadI32(); err != nil {
 		return err
 	} else {
-		_field = &v
+		_field = v
 	}
 	p.Depth = _field
+	return nil
+}
+func (p *GetNetworkRequest) ReadField3(iprot thrift.TProtocol) error {
+	_, size, err := iprot.ReadListBegin()
+	if err != nil {
+		return err
+	}
+	_field := make([]RelationType, 0, size)
+	for i := 0; i < size; i++ {
+
+		var _elem RelationType
+		if v, err := iprot.ReadI32(); err != nil {
+			return err
+		} else {
+			_elem = RelationType(v)
+		}
+
+		_field = append(_field, _elem)
+	}
+	if err := iprot.ReadListEnd(); err != nil {
+		return err
+	}
+	p.RelationTypes = _field
+	return nil
+}
+func (p *GetNetworkRequest) ReadField4(iprot thrift.TProtocol) error {
+	_, size, err := iprot.ReadListBegin()
+	if err != nil {
+		return err
+	}
+	_field := make([]NodeType, 0, size)
+	for i := 0; i < size; i++ {
+
+		var _elem NodeType
+		if v, err := iprot.ReadI32(); err != nil {
+			return err
+		} else {
+			_elem = NodeType(v)
+		}
+
+		_field = append(_field, _elem)
+	}
+	if err := iprot.ReadListEnd(); err != nil {
+		return err
+	}
+	p.NodeTypes = _field
 	return nil
 }
 
@@ -6341,6 +6466,14 @@ func (p *GetNetworkRequest) Write(oprot thrift.TProtocol) (err error) {
 		}
 		if err = p.writeField2(oprot); err != nil {
 			fieldId = 2
+			goto WriteFieldError
+		}
+		if err = p.writeField3(oprot); err != nil {
+			fieldId = 3
+			goto WriteFieldError
+		}
+		if err = p.writeField4(oprot); err != nil {
+			fieldId = 4
 			goto WriteFieldError
 		}
 	}
@@ -6362,14 +6495,27 @@ WriteStructEndError:
 }
 
 func (p *GetNetworkRequest) writeField1(oprot thrift.TProtocol) (err error) {
-	if err = oprot.WriteFieldBegin("profession", thrift.STRING, 1); err != nil {
-		goto WriteFieldBeginError
-	}
-	if err := oprot.WriteString(p.Profession); err != nil {
-		return err
-	}
-	if err = oprot.WriteFieldEnd(); err != nil {
-		goto WriteFieldEndError
+	if p.IsSetStartNodeCriteria() {
+		if err = oprot.WriteFieldBegin("startNodeCriteria", thrift.MAP, 1); err != nil {
+			goto WriteFieldBeginError
+		}
+		if err := oprot.WriteMapBegin(thrift.STRING, thrift.STRING, len(p.StartNodeCriteria)); err != nil {
+			return err
+		}
+		for k, v := range p.StartNodeCriteria {
+			if err := oprot.WriteString(k); err != nil {
+				return err
+			}
+			if err := oprot.WriteString(v); err != nil {
+				return err
+			}
+		}
+		if err := oprot.WriteMapEnd(); err != nil {
+			return err
+		}
+		if err = oprot.WriteFieldEnd(); err != nil {
+			goto WriteFieldEndError
+		}
 	}
 	return nil
 WriteFieldBeginError:
@@ -6382,7 +6528,7 @@ func (p *GetNetworkRequest) writeField2(oprot thrift.TProtocol) (err error) {
 		if err = oprot.WriteFieldBegin("depth", thrift.I32, 2); err != nil {
 			goto WriteFieldBeginError
 		}
-		if err := oprot.WriteI32(*p.Depth); err != nil {
+		if err := oprot.WriteI32(p.Depth); err != nil {
 			return err
 		}
 		if err = oprot.WriteFieldEnd(); err != nil {
@@ -6394,6 +6540,58 @@ WriteFieldBeginError:
 	return thrift.PrependError(fmt.Sprintf("%T write field 2 begin error: ", p), err)
 WriteFieldEndError:
 	return thrift.PrependError(fmt.Sprintf("%T write field 2 end error: ", p), err)
+}
+func (p *GetNetworkRequest) writeField3(oprot thrift.TProtocol) (err error) {
+	if p.IsSetRelationTypes() {
+		if err = oprot.WriteFieldBegin("relationTypes", thrift.LIST, 3); err != nil {
+			goto WriteFieldBeginError
+		}
+		if err := oprot.WriteListBegin(thrift.I32, len(p.RelationTypes)); err != nil {
+			return err
+		}
+		for _, v := range p.RelationTypes {
+			if err := oprot.WriteI32(int32(v)); err != nil {
+				return err
+			}
+		}
+		if err := oprot.WriteListEnd(); err != nil {
+			return err
+		}
+		if err = oprot.WriteFieldEnd(); err != nil {
+			goto WriteFieldEndError
+		}
+	}
+	return nil
+WriteFieldBeginError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 3 begin error: ", p), err)
+WriteFieldEndError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 3 end error: ", p), err)
+}
+func (p *GetNetworkRequest) writeField4(oprot thrift.TProtocol) (err error) {
+	if p.IsSetNodeTypes() {
+		if err = oprot.WriteFieldBegin("nodeTypes", thrift.LIST, 4); err != nil {
+			goto WriteFieldBeginError
+		}
+		if err := oprot.WriteListBegin(thrift.I32, len(p.NodeTypes)); err != nil {
+			return err
+		}
+		for _, v := range p.NodeTypes {
+			if err := oprot.WriteI32(int32(v)); err != nil {
+				return err
+			}
+		}
+		if err := oprot.WriteListEnd(); err != nil {
+			return err
+		}
+		if err = oprot.WriteFieldEnd(); err != nil {
+			goto WriteFieldEndError
+		}
+	}
+	return nil
+WriteFieldBeginError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 4 begin error: ", p), err)
+WriteFieldEndError:
+	return thrift.PrependError(fmt.Sprintf("%T write field 4 end error: ", p), err)
 }
 
 func (p *GetNetworkRequest) String() string {

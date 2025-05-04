@@ -15,7 +15,13 @@ type NodeDAL interface {
 	ExecUpdateNode(ctx context.Context, session neo4j.SessionWithContext, id string, updates map[string]any) (neo4j.Node, []string /*labels*/, error)
 	ExecDeleteNode(ctx context.Context, session neo4j.SessionWithContext, id string) error
 	ExecSearchNodes(ctx context.Context, session neo4j.SessionWithContext, criteria map[string]string, nodeType *network.NodeType, limit, offset int64) ([]neo4j.Node, [][]string /*labels*/, int64 /*total*/, error)
-	ExecGetNetwork(ctx context.Context, session neo4j.SessionWithContext, profession string, depth int32, limit, offset int64) ([]neo4j.Node, []neo4j.Relationship, error)
+	ExecGetNetwork(ctx context.Context, session neo4j.SessionWithContext,
+		startNodeCriteria map[string]string,
+		depth int32,
+		limit, offset int64,
+		relationTypes []network.RelationType,
+		nodeTypes []network.NodeType,
+	) ([]neo4j.Node, []neo4j.Relationship, error)
 	ExecGetPath(ctx context.Context, session neo4j.SessionWithContext, sourceID, targetID string, maxDepth int32, relTypes []string) ([]neo4j.Node, []neo4j.Relationship, error)
 }
 

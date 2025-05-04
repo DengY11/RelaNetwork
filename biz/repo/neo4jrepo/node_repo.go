@@ -504,10 +504,54 @@ type getNetworkCacheValue struct {
 
 // generateGetNetworkCacheKey 生成 GetNetwork 的缓存键
 func generateGetNetworkCacheKey(req *network.GetNetworkRequest, maxDepth int32, limit, offset int64) string {
-	// 包含 Profession (可能为空), maxDepth, limit, offset
-	// 使用 Profession 值本身，如果可能很长或包含特殊字符，可以考虑哈希
-	profession := req.Profession // Profession 是 string 类型
-	return fmt.Sprintf("%s%s:%d:%d:%d", GetNetworkCachePrefix, profession, maxDepth, limit, offset)
+	// 1. 对 criteria map 的键进行排序
+	criteriaKeys := make([]string, 0, len(req.StartNodeCriteria))
+	for k := range req.StartNodeCriteria {
+		criteriaKeys = append(criteriaKeys, k)
+	}
+	sort.Strings(criteriaKeys)
+
+	// 2. 构建规范化的 criteria 字符串
+	var criteriaBuilder strings.Builder
+	for i, k := range criteriaKeys {
+		if i > 0 {
+			criteriaBuilder.WriteString("|")
+		}
+		criteriaBuilder.WriteString(k)
+		criteriaBuilder.WriteString("=")
+		criteriaBuilder.WriteString(req.StartNodeCriteria[k])
+	}
+	criteriaStr := criteriaBuilder.String()
+
+	// 3. 对 relationTypes 进行排序和拼接
+	relTypesStr := make([]string, 0, len(req.RelationTypes))
+	if req.IsSetRelationTypes() {
+		for _, rt := range req.RelationTypes {
+			relTypesStr = append(relTypesStr, rt.String())
+		}
+	}
+	sort.Strings(relTypesStr)
+	relTypesKeyPart := strings.Join(relTypesStr, ",")
+
+	// 4. 对 nodeTypes 进行排序和拼接
+	nodeTypesStr := make([]string, 0, len(req.NodeTypes))
+	if req.IsSetNodeTypes() {
+		for _, nt := range req.NodeTypes {
+			nodeTypesStr = append(nodeTypesStr, nt.String())
+		}
+	}
+	sort.Strings(nodeTypesStr)
+	nodeTypesKeyPart := strings.Join(nodeTypesStr, ",")
+
+	// 5. 哈希组合键以避免过长
+	hasher := sha1.New()
+	hasher.Write([]byte(criteriaStr))
+	hasher.Write([]byte(relTypesKeyPart))
+	hasher.Write([]byte(nodeTypesKeyPart))
+	combinedHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// 6. 格式: prefix:combined_hash:depth:limit:offset
+	return fmt.Sprintf("%s%s:%d:%d:%d", GetNetworkCachePrefix, combinedHash, maxDepth, limit, offset)
 }
 
 // GetNetwork 获取网络图谱 (节点和关系)，带缓存
@@ -515,16 +559,13 @@ func generateGetNetworkCacheKey(req *network.GetNetworkRequest, maxDepth int32, 
 func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkRequest) ([]*network.Node, []*network.Relation, error) {
 	// 1. 处理参数和计算默认值
 	var maxDepth int32 = 1 // 默认深度
-	if req.IsSetDepth() {
-		maxDepth = *req.Depth
-		if maxDepth == 0 {
-			// Return error if depth is explicitly set to 0, as per user suggestion
-			return nil, nil, fmt.Errorf("%w: depth 0 is not allowed for GetNetwork", ErrInvalidDepth)
+	// Directly access Depth as it's not optional/pointer in the latest thrift
+	if req.Depth > 0 { // Check if Depth is set and valid
+		maxDepth = req.Depth
+		if maxDepth > 5 { // Keep max depth check
+			maxDepth = 1 // Reset to default if invalid range (e.g., > 5)
 		}
-		if maxDepth < 0 || maxDepth > 5 { // Keep max depth check
-			maxDepth = 1 // Reset to default if invalid range
-		}
-	}
+	} // If Depth is 0 or less, the default of 1 will be used.
 	var limit int64 = 100 // 默认限制
 	var offset int64 = 0  // 默认偏移
 
@@ -672,8 +713,17 @@ func (r *neo4jNodeRepo) getNetworkDirectAndRaw(ctx context.Context, req *network
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// 调用 DAL 层获取网络数据
-	dbNodes, dbRelations, err = r.nodeDAL.ExecGetNetwork(ctx, session, req.Profession, maxDepth, limit, offset)
+	// 调用 DAL 层获取网络数据 - 使用新的参数
+	dbNodes, dbRelations, err = r.nodeDAL.ExecGetNetwork(
+		ctx,
+		session,
+		req.StartNodeCriteria, // 使用 StartNodeCriteria
+		maxDepth,
+		limit,
+		offset,
+		req.RelationTypes, // 传递 RelationTypes
+		req.NodeTypes,     // 传递 NodeTypes
+	)
 	if err != nil {
 		// GetNetwork 通常不认为"未找到匹配 profession 的节点"是错误，DAL 应返回空列表
 		// 仅处理真正的执行错误

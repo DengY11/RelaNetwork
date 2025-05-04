@@ -3,6 +3,7 @@ package neo4jdal
 import (
 	"context"
 	"errors"
+	"sort"
 	"testing"
 	"time"
 
@@ -296,25 +297,118 @@ func TestNeo4jNodeDAL_ExecSearchNodes(t *testing.T) {
 func TestNeo4jNodeDAL_ExecGetNetwork(t *testing.T) {
 	dal := NewNodeDAL()
 	ctx := context.Background()
-	profession := "Engineer"
-	depth := int32(2)
-	limit, offset := int64(3), int64(1)
 
-	// 模拟网络查询结果
-	n0 := dbtype.Node{Id: 100, Labels: []string{"PERSON"}, Props: map[string]any{"profession": profession}}
-	r0 := dbtype.Relationship{Id: 200, Type: "COLLEAGUE"}
-	nodes := []neo4j.Node{n0}
-	rels := []neo4j.Relationship{r0}
+	// --- 模拟一个更复杂的网络图 ---
+	p1 := dbtype.Node{Id: 1, Labels: []string{"PERSON"}, Props: map[string]any{"id": "p1", "name": "Alice", "profession": "Engineer"}}
+	p2 := dbtype.Node{Id: 2, Labels: []string{"PERSON"}, Props: map[string]any{"id": "p2", "name": "Bob", "profession": "Engineer"}}
+	p3 := dbtype.Node{Id: 3, Labels: []string{"PERSON"}, Props: map[string]any{"id": "p3", "name": "Charlie", "profession": "Manager"}}
+	p4 := dbtype.Node{Id: 4, Labels: []string{"PERSON"}, Props: map[string]any{"id": "p4", "name": "David", "profession": "Engineer"}} // 另一个工程师
+	c1 := dbtype.Node{Id: 10, Labels: []string{"COMPANY"}, Props: map[string]any{"id": "c1", "name": "CompA"}}
+	_ = dbtype.Node{Id: 11, Labels: []string{"COMPANY"}, Props: map[string]any{"id": "c2", "name": "CompB"}} // Ignore c2
 
-	mockSession := new(MockSession)
-	mockSession.On("ExecuteRead", ctx, mock.AnythingOfType("neo4j.ManagedTransactionWork"), mock.Anything).
-		Return(map[string]any{"nodes": nodes, "rels": rels}, nil).Once()
+	// A -(COLLEAGUE)-> B, B -(COLLEAGUE)-> C, A -(FRIEND)-> C, A -(VISITED)-> CompA, D -(COLLEAGUE)-> CompA
+	r_p1_p2 := dbtype.Relationship{Id: 101, StartId: p1.Id, EndId: p2.Id, Type: "COLLEAGUE", Props: map[string]any{"id": "r12"}} // p1->p2
+	r_p2_p3 := dbtype.Relationship{Id: 102, StartId: p2.Id, EndId: p3.Id, Type: "COLLEAGUE", Props: map[string]any{"id": "r23"}} // p2->p3
+	r_p1_p3 := dbtype.Relationship{Id: 103, StartId: p1.Id, EndId: p3.Id, Type: "FRIEND", Props: map[string]any{"id": "r13"}}    // p1->p3
+	_ = dbtype.Relationship{Id: 104, StartId: p1.Id, EndId: c1.Id, Type: "VISITED", Props: map[string]any{"id": "r1c1"}}         // Ignore r_p1_c1
+	_ = dbtype.Relationship{Id: 105, StartId: p4.Id, EndId: c1.Id, Type: "COLLEAGUE", Props: map[string]any{"id": "r4c1"}}       // Ignore r_p4_c1
 
-	gotNodes, gotRels, err := dal.ExecGetNetwork(ctx, mockSession, profession, depth, limit, offset)
-	assert.NoError(t, err)
-	assert.Equal(t, nodes, gotNodes)
-	assert.Equal(t, rels, gotRels)
-	mockSession.AssertExpectations(t)
+	// --- 测试场景：从 P1 (Engineer) 出发，深度 2，只看 COLLEAGUE 关系，只看 PERSON 节点 ---
+	t.Run("从P1深度2只看同事和人", func(t *testing.T) {
+		startCriteria := map[string]string{"id": "p1"}
+		depth := int32(2)
+		limit, offset := int64(10), int64(0)
+		relTypes := []network.RelationType{network.RelationType_COLLEAGUE}
+		nodeTypes := []network.NodeType{network.NodeType_PERSON}
+
+		// 预期的结果 (根据上面的规则):
+		// 1. P1 -> P2 (COLLEAGUE, PERSON)
+		// 2. P2 -> P3 (COLLEAGUE, PERSON)
+		// 路径 P1->P2->P3 满足条件。
+		// 路径 P1->P3 (FRIEND) 不满足关系类型。
+		// 路径 P1->C1 (VISITED) 不满足关系类型。
+		// 路径 P4->C1 不从 P1 开始。
+		// 预期节点: P1, P2, P3
+		// 预期关系: r_p1_p2, r_p2_p3
+		expectedNodes := []neo4j.Node{p1, p2, p3}
+		expectedRels := []neo4j.Relationship{r_p1_p2, r_p2_p3}
+
+		mockSession := new(MockSession)
+		// Mock 返回预期的过滤和裁剪后的结果
+		mockSession.On("ExecuteRead", ctx, mock.AnythingOfType("neo4j.ManagedTransactionWork"), mock.Anything).
+			Return(map[string]any{"nodes": expectedNodes, "rels": expectedRels}, nil).Once()
+
+		gotNodes, gotRels, err := dal.ExecGetNetwork(ctx, mockSession, startCriteria, depth, limit, offset, relTypes, nodeTypes)
+		assert.NoError(t, err)
+
+		// 对比返回的节点和关系 (可能需要排序以确保一致性)
+		sortNodesForTest(gotNodes)
+		sortRelsForTest(gotRels)
+		sortNodesForTest(expectedNodes)
+		sortRelsForTest(expectedRels)
+
+		assert.Equal(t, expectedNodes, gotNodes, "返回的节点不匹配预期")
+		assert.Equal(t, expectedRels, gotRels, "返回的关系不匹配预期")
+		mockSession.AssertExpectations(t)
+	})
+
+	// --- 测试场景：从所有 Engineer 出发，深度 1，分页获取第 2 个节点/关系 ---
+	t.Run("从所有工程师深度1分页", func(t *testing.T) {
+		startCriteria := map[string]string{"profession": "Engineer"} // P1, P2, P4
+		depth := int32(1)
+		limit, offset := int64(1), int64(1)       // 获取第 2 条记录 (index 1)
+		var relTypes []network.RelationType = nil // 无关系类型过滤
+		var nodeTypes []network.NodeType = nil    // 无节点类型过滤
+
+		// 预期的完整结果集 (深度 1):
+		// 从 P1: P1, P2(C), P3(F), C1(V)  |  r12(C), r13(F), r1c1(V)
+		// 从 P2: P2, P1(C), P3(C)        |  r12(C), r23(C)
+		// 从 P4: P4, C1(C)              |  r4c1(C)
+		// 合并去重节点: P1, P2, P3, P4, C1
+		// 合并去重关系: r12, r23, r13, r1c1, r4c1
+		// 假设数据库返回的结果经过 UNWIND 和分页处理，只返回第 2 个节点和第 2 个关系
+		// (注意: Mock 应该返回分页 *后* 的结果)
+		// 假设按某种顺序（例如节点ID，关系ID），第2个节点是 P2，第2个关系是 r13
+		expectedNodesPage2 := []neo4j.Node{p2}
+		expectedRelsPage2 := []neo4j.Relationship{r_p1_p3} // 假设r13是排序后的第2个
+
+		mockSession := new(MockSession)
+		// Mock 返回预期的分页结果
+		mockSession.On("ExecuteRead", ctx, mock.AnythingOfType("neo4j.ManagedTransactionWork"), mock.Anything).
+			Return(map[string]any{"nodes": expectedNodesPage2, "rels": expectedRelsPage2}, nil).Once()
+
+		gotNodes, gotRels, err := dal.ExecGetNetwork(ctx, mockSession, startCriteria, depth, limit, offset, relTypes, nodeTypes)
+		assert.NoError(t, err)
+
+		// 断言分页结果
+		assert.Equal(t, expectedNodesPage2, gotNodes, "分页返回的节点不匹配预期")
+		assert.Equal(t, expectedRelsPage2, gotRels, "分页返回的关系不匹配预期")
+		mockSession.AssertExpectations(t)
+	})
+
+	// --- 测试场景：没有匹配的起始节点 ---
+	t.Run("无匹配起始节点", func(t *testing.T) {
+		startCriteria := map[string]string{"profession": "Doctor"} // 不存在的职业
+		depth := int32(1)
+		limit, offset := int64(10), int64(0)
+		var relTypes []network.RelationType = nil
+		var nodeTypes []network.NodeType = nil
+
+		// 预期结果为空
+		expectedNodes := []neo4j.Node{}
+		expectedRels := []neo4j.Relationship{}
+
+		mockSession := new(MockSession)
+		// Mock ExecuteRead 返回空结果的 map
+		mockSession.On("ExecuteRead", ctx, mock.AnythingOfType("neo4j.ManagedTransactionWork"), mock.Anything).
+			Return(map[string]any{"nodes": expectedNodes, "rels": expectedRels}, nil).Once()
+
+		gotNodes, gotRels, err := dal.ExecGetNetwork(ctx, mockSession, startCriteria, depth, limit, offset, relTypes, nodeTypes)
+		assert.NoError(t, err)
+		assert.Empty(t, gotNodes, "无匹配起始节点时应返回空节点列表")
+		assert.Empty(t, gotRels, "无匹配起始节点时应返回空关系列表")
+		mockSession.AssertExpectations(t)
+	})
 }
 
 // --- 测试 ExecGetPath ---
@@ -341,4 +435,22 @@ func TestNeo4jNodeDAL_ExecGetPath(t *testing.T) {
 	assert.Equal(t, nodes, gotNodes)
 	assert.Equal(t, rels, gotRels)
 	mockSession.AssertExpectations(t)
+}
+
+// 辅助函数，用于对节点列表排序以便比较
+func sortNodesForTest(nodes []neo4j.Node) {
+	sort.Slice(nodes, func(i, j int) bool {
+		idI, _ := nodes[i].Props["id"].(string)
+		idJ, _ := nodes[j].Props["id"].(string)
+		return idI < idJ
+	})
+}
+
+// 辅助函数，用于对关系列表排序以便比较
+func sortRelsForTest(rels []neo4j.Relationship) {
+	sort.Slice(rels, func(i, j int) bool {
+		idI, _ := rels[i].Props["id"].(string)
+		idJ, _ := rels[j].Props["id"].(string)
+		return idI < idJ
+	})
 }
