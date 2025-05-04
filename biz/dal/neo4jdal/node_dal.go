@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	network "labelwall/biz/model/relationship/network"
 
@@ -130,76 +129,121 @@ func (d *neo4jNodeDAL) ExecGetNodeByID(ctx context.Context, session neo4j.Sessio
 // updates map 由 Repo 层准备，包含需要 SET 的属性。
 func (d *neo4jNodeDAL) ExecUpdateNode(ctx context.Context, session neo4j.SessionWithContext, id string, updates map[string]any) (neo4j.Node, []string, error) {
 
-	nodeResult, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+	// 在事务函数外部声明需要返回的变量
+	var updatedNode dbtype.Node
+	var labels []string
 
-		// 先检查节点的存在性
+	// 使用 ExecuteWrite 在事务中执行写操作
+	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
+		// 1. 检查节点是否存在 (这一步在事务内执行可能不是最佳实践，但保持原逻辑)
+		// 更好的做法可能是在调用 ExecUpdateNode 之前由 Repo 层检查，或者允许更新操作本身在节点不存在时静默失败或由 Cypher 处理
+		/* // 暂时注释掉内部的存在性检查，依赖 Cypher 的 MATCH 行为
 		existsQuery := "MATCH (n{id: $id}) RETURN count(n) AS cnt"
-		existsResult, err := session.Run(ctx, existsQuery, map[string]any{"id": id})
+		existsResult, err := tx.Run(ctx, existsQuery, map[string]any{"id": id})
 		if err != nil {
 			return nil, fmt.Errorf("DAL: 检查节点存在性失败: %w", err)
 		}
-		record, err := existsResult.Single(ctx)
+		recordExists, err := existsResult.Single(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("DAL: 获取节点存在性结果失败: %w", err)
 		}
-		count, _ := record.Get("count")
+		count, _ := recordExists.Get("count")
 		if count.(int64) == 0 {
-			return nil, fmt.Errorf("DAL: 节点ID %s 不存在", id)
+			// 如果节点不存在，Neo4j 的 MATCH..SET..RETURN 会失败，错误会由后续的 result.Single() 捕获
+			// return nil, fmt.Errorf("DAL: 节点ID %s 不存在", id) // 返回特定错误可能更好
 		}
+		*/
 
-		// 动态构建 SET 子句。
+		// 2. 构建更新查询
 		var setClauses []string
-
 		params := map[string]any{"id": id} // 初始化参数 map
 		for key, value := range updates {
-			//例如，如果 updates 包含 {"name": "张三", "age": 30}，会生成：
-			//SET 子句：n.name = $update_name, n.age = $update_age
-			//参数：{"id": "node123", "update_name": "张三", "update_age": 30}
 			paramName := "update_" + key
 			setClauses = append(setClauses, fmt.Sprintf("n.%s = $%s", key, paramName))
 			params[paramName] = value
 		}
-		// 总是自动更新 updated_at 时间戳。
-		setClauses = append(setClauses, "n.updated_at = $now")
-		params["now"] = time.Now().UTC()
+		// updated_at 已由 repo 层传入 updates map，无需在此处重复添加
+		// setClauses = append(setClauses, "n.updated_at = $now")
+		// params["now"] = time.Now().UTC()
 
-		// 参数列表 {"id":id}, {"update_key1":value1}, {"update_key2":value2}
-		query := fmt.Sprintf(`MATCH (n {id: $id})
-			SET %s RETURN n, labels(n) AS labels`, strings.Join(setClauses, ", "))
+		// 如果没有要更新的属性（例如只更新 updated_at），setClauses 会为空，需要处理
+		if len(setClauses) == 0 {
+			// 也许只更新时间戳？或者返回错误？取决于业务逻辑
+			// 如果 repo 层总是确保有 updated_at，这里至少会有一条
+			// return nil, fmt.Errorf("DAL: 没有提供要更新的属性")
+			// 暂定：如果传入的 updates 为空，则可能只更新时间戳（如果业务逻辑如此）
+			// 假设 repo 层会处理 updates map 的内容
+			return nil, fmt.Errorf("DAL: 内部错误 - 更新属性列表为空") // 或者采取其他策略
+		}
+
+		query := fmt.Sprintf(`MATCH (n {id: $id}) SET %s RETURN n, labels(n) AS labels`, strings.Join(setClauses, ", "))
 
 		result, err := tx.Run(ctx, query, params)
 		if err != nil {
 			return nil, fmt.Errorf("DAL: 运行更新节点查询失败: %w", err)
 		}
-		// 获取更新后的单个节点结果。
-		record, err = result.Single(ctx)
+
+		// 3. 获取更新后的结果
+		record, err := result.Single(ctx)
 		if err != nil {
+			// 检查是否因为节点未找到而失败
+			usageErr := new(neo4j.UsageError)
+			if errors.As(err, &usageErr) && strings.Contains(usageErr.Error(), "result contains no more records") {
+				// 返回表示未找到的错误，让 Repo 层处理
+				return nil, fmt.Errorf("DAL: 未找到要更新的节点 ID %s", id)
+			}
 			return nil, fmt.Errorf("DAL: 获取更新节点结果失败: %w", err)
 		}
-		// 解析返回的节点和标签。
+
+		// 4. 解析节点和标签 (赋值给外部变量)
 		nodeInterface, _ := record.Get("n")
 		labelsInterface, _ := record.Get("labels")
-		dbNode, ok := nodeInterface.(dbtype.Node)
+
+		nodeVal, ok := nodeInterface.(dbtype.Node)
 		if !ok {
 			return nil, fmt.Errorf("DAL: 结果中的 'n' 不是有效的节点类型")
 		}
+		updatedNode = nodeVal // 赋值给外部变量
+
 		labelsRaw, ok := labelsInterface.([]any)
 		if !ok {
 			return nil, fmt.Errorf("DAL: 无法解析节点标签")
 		}
-		labels := make([]string, len(labelsRaw))
+		lb := make([]string, len(labelsRaw))
 		for i, l := range labelsRaw {
-			labels[i] = l.(string)
+			labelStr, ok := l.(string)
+			if !ok {
+				return nil, fmt.Errorf("DAL: 无法将标签断言为字符串")
+			}
+			lb[i] = labelStr
 		}
-		return map[string]any{"node": dbNode, "labels": labels}, nil
+		labels = lb // 赋值给外部变量
+
+		// 5. 消费结果并检查计数器 (确保 Consume 在 Single 之后)
+		summary, summaryErr := result.Consume(ctx) // summary 变量在此作用域内
+		if summaryErr != nil {
+			// 即使 Single 成功，Consume 也可能出错
+			return nil, fmt.Errorf("DAL: 消费更新结果失败: %w", summaryErr)
+		}
+
+		// 6. 添加对 summary 和 Counters() 的 nil 检查
+		if summary == nil || summary.Counters() == nil {
+			fmt.Printf("警告: 更新节点后 summary 或 counters 为 nil (ID: %s)\n", id) // TODO: 使用日志库
+		} else if summary.Counters().PropertiesSet() == 0 {
+			// 理论上如果 Single 成功，PropertiesSet 应该 > 0
+			fmt.Printf("警告: 更新节点后 PropertiesSet 为 0 (ID: %s)\n", id) // TODO: 使用日志库
+		}
+
+		return nil, nil // 事务成功
 	})
-	// 处理事务错误
+
 	if err != nil {
+		// 返回事务执行中遇到的错误 (包括自定义的 EntityNotFound)
 		return dbtype.Node{}, nil, err
 	}
-	// 解析结果 map
-	resultMap := nodeResult.(map[string]any)
-	return resultMap["node"].(dbtype.Node), resultMap["labels"].([]string), nil
+
+	// 如果事务成功，返回从事务内部赋值的节点和标签
+	return updatedNode, labels, nil
 }
 
 // ExecDeleteNode 执行根据id删除节点的 Cypher，并确认节点是否被删除。
