@@ -141,7 +141,8 @@ func (s *networkService) DeleteRelation(ctx context.Context, req *network.Delete
 // SearchNodes 处理搜索节点的业务逻辑
 func (s *networkService) SearchNodes(ctx context.Context, req *network.SearchNodesRequest) (*network.SearchNodesResponse, error) {
 	// TODO: 实现 SearchNodes 业务逻辑，调用 s.nodeRepo.SearchNodes
-	fmt.Printf("TODO: Service 实现 SearchNodes, keyword: %s\n", req.Keyword)
+	// 使用 req.Criteria 替换 req.Keyword
+	fmt.Printf("TODO: Service 实现 SearchNodes, criteria: %v\n", req.Criteria)
 	return nil, fmt.Errorf("Service: SearchNodes 未实现")
 }
 

@@ -97,7 +97,7 @@ struct DeleteNodeResponse {
 
 // 搜索节点请求
 struct SearchNodesRequest {
-    1: string keyword           // 搜索关键词
+    1: optional map<string, string> criteria // 新增: 搜索条件 (key: 属性名, value: 搜索值)
     2: optional NodeType type   // 节点类型(可选)
     3: optional i32 limit       // 限制返回数量
     4: optional i32 offset      // 偏移量，用于分页

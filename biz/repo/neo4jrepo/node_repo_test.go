@@ -2,12 +2,18 @@ package neo4jrepo_test
 
 import (
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/redis/go-redis/v9" // Or your chosen Redis client library
 	"github.com/stretchr/testify/assert"
@@ -24,7 +30,13 @@ var (
 	testDriver  neo4j.DriverWithContext
 	testCache   cache.NodeAndByteCache
 	redisClient *redis.Client
+	testRelRepo neo4jrepo.RelationRepository
 )
+
+// Helper function to get pointer to NodeType
+func nodeTypePtr(t network.NodeType) *network.NodeType {
+	return &t
+}
 
 // TestMain sets up the database and cache connection for all tests in the package
 func TestMain(m *testing.M) {
@@ -79,16 +91,16 @@ func TestMain(m *testing.M) {
 	testCache = testCacheImpl // Assign to the interface variable
 
 	// --- Setup DAL ---
-	// Assuming NewNodeDAL constructor exists in the neo4jdal package and takes the driver
-	nodeDal := neo4jdal.NewNodeDAL() // Call constructor without arguments
+	nodeDal := neo4jdal.NewNodeDAL()
+	// Instantiate RelationDAL as well if needed for RelationRepository
+	// relationDal := neo4jdal.NewRelationDAL() // Assuming constructor exists
 
 	// --- Setup Repository ---
-	// We need a real RelationRepository implementation or a minimal mock/stub if its methods aren't directly tested here
-	// For now, let's assume a minimal stub or nil if NodeRepository methods don't strictly require it.
-	// If RelationRepository methods *are* needed (like in GetNetwork tests), you'll need a real one too.
-	var dummyRelRepo neo4jrepo.RelationRepository // Replace with real or functional stub if needed
-	// Pass the real NodeDAL implementation instead of nil
-	testRepo = neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, dummyRelRepo)
+	// Instantiate real RelationRepository if GetNetwork/GetPath tests are added
+	// For now, SearchNodes only needs NodeRepository, but let's prepare
+	// testRelRepo = neo4jrepo.NewRelationRepository(testDriver, relationDal, testCache, nil) // Assuming constructor and Cache implements RelationAndByteCache
+	var dummyRelRepo neo4jrepo.RelationRepository                                        // Keep dummy for now
+	testRepo = neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, dummyRelRepo) // Pass the real NodeDAL
 
 	// --- Clean Database & Cache Before Running ---
 	clearTestData(context.Background())
@@ -97,11 +109,8 @@ func TestMain(m *testing.M) {
 	exitCode := m.Run()
 
 	// --- Teardown ---
-	// Optional: Clean up again after tests
-	// clearTestData(context.Background())
 	testDriver.Close(context.Background())
 	redisClient.Close()
-
 	os.Exit(exitCode)
 }
 
@@ -164,6 +173,12 @@ func createNodeDirectly(ctx context.Context, node *network.Node) error {
 			}
 		}
 	}
+
+	// Ensure ID is set if not provided
+	if node.ID == "" {
+		node.ID = uuid.NewString()
+	}
+	properties["id"] = node.ID // Make sure ID from struct is used
 
 	cypher := fmt.Sprintf("CREATE (n:%s $props) RETURN n", node.Type.String()) // Assuming NodeType.String() returns the label
 	_, err := session.Run(ctx, cypher, map[string]any{"props": properties})
@@ -444,4 +459,264 @@ func TestDeleteNode_Integration(t *testing.T) {
 	})
 }
 
-// --- Add tests for SearchNodes, GetNetwork, GetPath ---
+// --- Integration Test for SearchNodes ---
+
+// Helper function to sort nodes by ID for consistent comparison
+func sortNodesByID(nodes []*network.Node) {
+	sort.Slice(nodes, func(i, j int) bool {
+		return nodes[i].ID < nodes[j].ID
+	})
+}
+
+// Helper function to generate cache key for SearchNodes (mirroring repo logic)
+func generateSearchNodesCacheKeyForTest(req *network.SearchNodesRequest) string {
+	// Mirror the logic from neo4jNodeRepo.generateSearchNodesCacheKey
+	// Note: This makes the test dependent on the internal key generation logic.
+	// Alternatively, find the key by pattern matching in Redis if exact generation is complex/unstable.
+
+	// 1. Sort criteria keys
+	keys := make([]string, 0, len(req.Criteria))
+	for k := range req.Criteria {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	// 2. Build canonical criteria string
+	var criteriaBuilder strings.Builder // Import strings
+	for i, k := range keys {
+		if i > 0 {
+			criteriaBuilder.WriteString("|")
+		}
+		criteriaBuilder.WriteString(k)
+		criteriaBuilder.WriteString("=")
+		criteriaBuilder.WriteString(req.Criteria[k])
+	}
+	criteriaStr := criteriaBuilder.String()
+
+	// 3. Hash criteria string
+	hasher := sha1.New() // Import crypto/sha1
+	hasher.Write([]byte(criteriaStr))
+	criteriaHash := hex.EncodeToString(hasher.Sum(nil)) // Import encoding/hex
+
+	// 4. Limit and Offset
+	var limitVal, offsetVal int32
+	if req.Limit != nil {
+		limitVal = *req.Limit
+	}
+	if req.Offset != nil {
+		offsetVal = *req.Offset
+	}
+
+	// 5. Node Type
+	var nodeTypeStr string
+	if req.Type != nil {
+		nodeTypeStr = req.Type.String()
+	} else {
+		nodeTypeStr = "ANY" // Match repo logic
+	}
+
+	// 6. Format key
+	return fmt.Sprintf("%s%s:%s:%d:%d", neo4jrepo.SearchNodesCachePrefix, criteriaHash, nodeTypeStr, limitVal, offsetVal)
+}
+
+// Define a local struct matching the unexported one for unmarshalling cache data
+// Alternatively, export the struct from the neo4jrepo package
+type searchNodesCacheValueForTest struct {
+	NodeIDs []string `json:"node_ids"`
+	Total   int32    `json:"total"`
+}
+
+func TestSearchNodes_Integration(t *testing.T) {
+	ctx := context.Background()
+	require.NotNil(t, testRepo, "Repository should be initialized")
+	require.NotNil(t, testCache, "Cache should be initialized")
+	clearTestData(ctx)
+
+	// 1. Setup: Create several nodes
+	nodesToCreate := []*network.Node{
+		{ID: "search-p1", Type: network.NodeType_PERSON, Name: "Alice Smith", Profession: func(s string) *string { return &s }("Engineer")},
+		{ID: "search-p2", Type: network.NodeType_PERSON, Name: "Bob Johnson", Profession: func(s string) *string { return &s }("Engineer")},
+		{ID: "search-p3", Type: network.NodeType_PERSON, Name: "Charlie Brown", Profession: func(s string) *string { return &s }("Designer")},
+		{ID: "search-c1", Type: network.NodeType_COMPANY, Name: "Alpha Corp"},
+		{ID: "search-c2", Type: network.NodeType_COMPANY, Name: "Beta Inc."},
+	}
+	for _, node := range nodesToCreate {
+		err := createNodeDirectly(ctx, node)
+		require.NoError(t, err, "Failed to create node for search test: %s", node.ID)
+	}
+	// Pre-cache Alice Smith for later tests
+	_, err := testRepo.GetNode(ctx, "search-p1")
+	require.NoError(t, err)
+
+	// --- Test Case 1: Search by keyword (PERSON, "Smith") - Cache Miss ---
+	t.Run("Search Keyword Cache Miss", func(t *testing.T) {
+		searchReq := &network.SearchNodesRequest{
+			Type: nodeTypePtr(network.NodeType_PERSON), // Pass pointer
+			// Use Criteria map instead of Keyword
+			Criteria: map[string]string{"name": "Smith"},
+			Limit:    func(i int32) *int32 { return &i }(10),
+			Offset:   func(i int32) *int32 { return &i }(0),
+		}
+		cacheKey := generateSearchNodesCacheKeyForTest(searchReq) // Generate expected cache key
+
+		// Verify cache is initially empty for this search
+		_, err := testCache.Get(ctx, cacheKey)
+		assert.ErrorIs(t, err, cache.ErrNotFound, "Cache should be empty before first search")
+
+		// Execute search
+		nodes, total, err := testRepo.SearchNodes(ctx, searchReq)
+		require.NoError(t, err, "SearchNodes failed")
+		assert.EqualValues(t, 1, total, "Expected 1 total result")
+		require.Len(t, nodes, 1, "Expected 1 node in results")
+		assert.Equal(t, "search-p1", nodes[0].ID)
+		assert.Equal(t, "Alice Smith", nodes[0].Name)
+
+		// Verify cache population
+		time.Sleep(50 * time.Millisecond) // Allow cache write
+		cachedData, err := testCache.Get(ctx, cacheKey)
+		require.NoError(t, err, "Failed to get data from cache after search")
+		require.NotEmpty(t, cachedData, "Cache should contain data after search")
+
+		// Verify cache content (structure and values)
+		var cachedValue searchNodesCacheValueForTest // Use the local struct for test
+		err = json.Unmarshal(cachedData, &cachedValue)
+		require.NoError(t, err, "Failed to unmarshal cached search data")
+		assert.EqualValues(t, 1, cachedValue.Total)
+		require.Len(t, cachedValue.NodeIDs, 1)
+		assert.Equal(t, "search-p1", cachedValue.NodeIDs[0])
+	})
+
+	// --- Test Case 2: Search by keyword (PERSON, "Smith") - Cache Hit ---
+	t.Run("Search Keyword Cache Hit", func(t *testing.T) {
+		searchReq := &network.SearchNodesRequest{
+			Type: nodeTypePtr(network.NodeType_PERSON), // Pass pointer
+			// Use Criteria map
+			Criteria: map[string]string{"name": "Smith"},
+			Limit:    func(i int32) *int32 { return &i }(10),
+			Offset:   func(i int32) *int32 { return &i }(0),
+		}
+		cacheKey := generateSearchNodesCacheKeyForTest(searchReq)
+
+		// Ensure cache key exists from previous test (or re-run miss test logic if needed)
+		_, err := testCache.Get(ctx, cacheKey)
+		require.NoError(t, err, "Cache key should exist for cache hit test")
+
+		// Execute search again
+		// Add logging in SearchNodes repo method to confirm cache hit if needed
+		t.Log("Expecting SearchNodes cache hit...")
+		nodes, total, err := testRepo.SearchNodes(ctx, searchReq)
+		require.NoError(t, err, "SearchNodes (cache hit) failed")
+		assert.EqualValues(t, 1, total, "Expected 1 total result (cache hit)")
+		require.Len(t, nodes, 1, "Expected 1 node in results (cache hit)")
+		assert.Equal(t, "search-p1", nodes[0].ID) // Alice Smith was pre-cached by GetNode earlier
+		assert.Equal(t, "Alice Smith", nodes[0].Name)
+		assert.Equal(t, "Engineer", *nodes[0].Profession) // Verify full node details are retrieved via GetNode
+	})
+
+	// --- Test Case 3: Search with Pagination (PERSON, "Engineer") ---
+	t.Run("Search with Pagination", func(t *testing.T) {
+		// Search Page 1 (Limit 1, Offset 0)
+		searchReq1 := &network.SearchNodesRequest{
+			Type: nodeTypePtr(network.NodeType_PERSON), // Pass pointer
+			// Use Criteria map for profession
+			Criteria: map[string]string{"profession": "Engineer"},
+			Limit:    func(i int32) *int32 { return &i }(1),
+			Offset:   func(i int32) *int32 { return &i }(0),
+		}
+		nodes1, total1, err1 := testRepo.SearchNodes(ctx, searchReq1)
+		require.NoError(t, err1)
+		assert.EqualValues(t, 2, total1, "Expected 2 total Engineers")
+		require.Len(t, nodes1, 1, "Expected 1 node on page 1")
+		// Note: Order depends on DB/DAL implementation (added ORDER BY n.name in DAL)
+		firstNodeID := nodes1[0].ID
+		assert.Contains(t, []string{"search-p1", "search-p2"}, firstNodeID) // Should be Alice or Bob
+
+		// Search Page 2 (Limit 1, Offset 1)
+		searchReq2 := &network.SearchNodesRequest{
+			Type: nodeTypePtr(network.NodeType_PERSON), // Pass pointer
+			// Use Criteria map for profession
+			Criteria: map[string]string{"profession": "Engineer"},
+			Limit:    func(i int32) *int32 { return &i }(1),
+			Offset:   func(i int32) *int32 { return &i }(1),
+		}
+		nodes2, total2, err2 := testRepo.SearchNodes(ctx, searchReq2)
+		require.NoError(t, err2)
+		assert.EqualValues(t, 2, total2, "Expected 2 total Engineers (page 2)")
+		require.Len(t, nodes2, 1, "Expected 1 node on page 2")
+		secondNodeID := nodes2[0].ID
+		assert.Contains(t, []string{"search-p1", "search-p2"}, secondNodeID) // Should be the other engineer
+		assert.NotEqual(t, firstNodeID, secondNodeID, "Page 1 and Page 2 node should be different")
+
+		// Verify caching for both pages
+		time.Sleep(50 * time.Millisecond)
+		cacheKey1 := generateSearchNodesCacheKeyForTest(searchReq1)
+		cachedData1, errCache1 := testCache.Get(ctx, cacheKey1)
+		require.NoError(t, errCache1)
+		require.NotEmpty(t, cachedData1)
+		var cachedVal1 searchNodesCacheValueForTest // Use local struct
+		require.NoError(t, json.Unmarshal(cachedData1, &cachedVal1))
+		assert.EqualValues(t, 2, cachedVal1.Total)
+		require.Len(t, cachedVal1.NodeIDs, 1)
+		assert.Equal(t, firstNodeID, cachedVal1.NodeIDs[0])
+
+		cacheKey2 := generateSearchNodesCacheKeyForTest(searchReq2)
+		cachedData2, errCache2 := testCache.Get(ctx, cacheKey2)
+		require.NoError(t, errCache2)
+		require.NotEmpty(t, cachedData2)
+		var cachedVal2 searchNodesCacheValueForTest // Use local struct
+		require.NoError(t, json.Unmarshal(cachedData2, &cachedVal2))
+		assert.EqualValues(t, 2, cachedVal2.Total)
+		require.Len(t, cachedVal2.NodeIDs, 1)
+		assert.Equal(t, secondNodeID, cachedVal2.NodeIDs[0])
+
+	})
+
+	// --- Test Case 4: Search with No Results (PERSON, "Unknown") ---
+	t.Run("Search No Results", func(t *testing.T) {
+		searchReq := &network.SearchNodesRequest{
+			Type: nodeTypePtr(network.NodeType_PERSON), // Pass pointer
+			// Use Criteria map
+			Criteria: map[string]string{"name": "UnknownKeyword"},
+			Limit:    func(i int32) *int32 { return &i }(10),
+			Offset:   func(i int32) *int32 { return &i }(0),
+		}
+		cacheKey := generateSearchNodesCacheKeyForTest(searchReq)
+
+		nodes, total, err := testRepo.SearchNodes(ctx, searchReq)
+		require.NoError(t, err)
+		assert.EqualValues(t, 0, total, "Expected 0 total results")
+		assert.Len(t, nodes, 0, "Expected 0 nodes in results")
+
+		// Verify empty placeholder caching
+		time.Sleep(50 * time.Millisecond)
+		cachedData, err := testCache.Get(ctx, cacheKey)
+		require.NoError(t, err, "Failed to get data from cache after empty search")
+		assert.Equal(t, []byte(neo4jrepo.SearchEmptyPlaceholder), cachedData, "Cache should contain empty placeholder")
+
+		// Search again (Cache Hit for empty)
+		nodesHit, totalHit, errHit := testRepo.SearchNodes(ctx, searchReq)
+		require.NoError(t, errHit)
+		assert.EqualValues(t, 0, totalHit, "Expected 0 total results (empty cache hit)")
+		assert.Len(t, nodesHit, 0, "Expected 0 nodes in results (empty cache hit)")
+
+	})
+
+	// --- Test Case 5: Search Different Node Type (COMPANY, "Corp") ---
+	t.Run("Search Different Type", func(t *testing.T) {
+		searchReq := &network.SearchNodesRequest{
+			Type: nodeTypePtr(network.NodeType_COMPANY), // Pass pointer
+			// Use Criteria map
+			Criteria: map[string]string{"name": "Corp"},
+			Limit:    func(i int32) *int32 { return &i }(10),
+			Offset:   func(i int32) *int32 { return &i }(0),
+		}
+		nodes, total, err := testRepo.SearchNodes(ctx, searchReq)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, total)
+		require.Len(t, nodes, 1)
+		assert.Equal(t, "search-c1", nodes[0].ID)
+		assert.Equal(t, "Alpha Corp", nodes[0].Name)
+	})
+}
+
+// --- Add tests for GetNetwork, GetPath ---

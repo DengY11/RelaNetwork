@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors" // 用于缓存错误检查
 	"fmt"    // 用于错误检查
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,8 +19,6 @@ import (
 	"labelwall/biz/dal/neo4jdal"
 	network "labelwall/biz/model/relationship/network"
 	"labelwall/pkg/cache" // 引入缓存包
-	"sort"
-	"strings"
 )
 
 const (
@@ -291,12 +291,31 @@ type searchNodesCacheValue struct {
 
 // generateSearchNodesCacheKey 生成搜索节点的缓存键
 func generateSearchNodesCacheKey(req *network.SearchNodesRequest) string {
-	// 使用 SHA1 哈希 Keyword 以避免过长或包含特殊字符的键
-	hasher := sha1.New()
-	hasher.Write([]byte(req.Keyword)) // Keyword 是 string 类型，可以直接写入
-	keywordHash := hex.EncodeToString(hasher.Sum(nil))
+	// 1. 对 criteria map 的键进行排序
+	keys := make([]string, 0, len(req.Criteria))
+	for k := range req.Criteria {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys) // 确保键的顺序一致
 
-	// 处理可能为 nil 的 Limit 和 Offset
+	// 2. 构建规范化的 criteria 字符串 (例如: key1=value1|key2=value2)
+	var criteriaBuilder strings.Builder
+	for i, k := range keys {
+		if i > 0 {
+			criteriaBuilder.WriteString("|") // 使用分隔符
+		}
+		criteriaBuilder.WriteString(k)
+		criteriaBuilder.WriteString("=")
+		criteriaBuilder.WriteString(req.Criteria[k])
+	}
+	criteriaStr := criteriaBuilder.String()
+
+	// 3. 使用 SHA1 哈希 criteria 字符串
+	hasher := sha1.New()
+	hasher.Write([]byte(criteriaStr))
+	criteriaHash := hex.EncodeToString(hasher.Sum(nil))
+
+	// 4. 处理可能为 nil 的 Limit 和 Offset
 	var limitVal, offsetVal int32
 	if req.Limit != nil {
 		limitVal = *req.Limit
@@ -305,11 +324,16 @@ func generateSearchNodesCacheKey(req *network.SearchNodesRequest) string {
 		offsetVal = *req.Offset
 	}
 
-	// NodeType 也是必需的
-	nodeTypeStr := req.Type.String()
+	// 5. NodeType 也是必需的
+	var nodeTypeStr string
+	if req.Type != nil { // 检查 Type 是否为 nil
+		nodeTypeStr = req.Type.String()
+	} else {
+		nodeTypeStr = "ANY" // 或者其他默认值
+	}
 
-	// 格式: prefix:keyword_hash:type:limit:offset
-	return fmt.Sprintf("%s%s:%s:%d:%d", SearchNodesCachePrefix, keywordHash, nodeTypeStr, limitVal, offsetVal)
+	// 6. 格式: prefix:criteria_hash:type:limit:offset
+	return fmt.Sprintf("%s%s:%s:%d:%d", SearchNodesCachePrefix, criteriaHash, nodeTypeStr, limitVal, offsetVal)
 }
 
 // SearchNodes 搜索节点 (带缓存)
@@ -418,14 +442,11 @@ func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.Sear
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
-	// 构建 DAL 查询条件
-	criteria := make(map[string]string)
-	if req.Keyword != "" { // Keyword 是 string 类型
-		// 假设按 name 模糊搜索，DAL 层会处理 CONTAINS 逻辑
-		criteria["name"] = req.Keyword
+	// 直接使用传入的 criteria，如果为 nil 则初始化为空 map
+	criteria := req.Criteria
+	if criteria == nil {
+		criteria = make(map[string]string)
 	}
-	// 如果 SearchNodesRequest 中添加了 Properties 字段，则在此处处理
-	// if req.Properties != nil { ... }
 
 	// 处理分页参数
 	var limit, offset int64
@@ -440,8 +461,12 @@ func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.Sear
 		offset = 0 // 默认偏移
 	}
 
+	// nodeType 从 req.Type 获取，已经是 *network.NodeType
+	nodeTypePtr := req.Type
+
 	// 调用 DAL 层执行搜索
-	dbNodes, labelsList, total, err := r.nodeDAL.ExecSearchNodes(ctx, session, criteria, req.Type, limit, offset)
+	// 确保 DAL 的 ExecSearchNodes 接受 map[string]string 作为 criteria 和 *network.NodeType 作为类型
+	dbNodes, labelsList, total, err := r.nodeDAL.ExecSearchNodes(ctx, session, criteria, nodeTypePtr, limit, offset)
 	if err != nil {
 		// 注意：这里不需要检查 isNotFoundError，因为搜索本身找不到是正常情况，DAL应返回空列表和0 total
 		return nil, 0, fmt.Errorf("repo: 调用 DAL 搜索节点失败: %w", err)
@@ -451,7 +476,7 @@ func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.Sear
 	resultNodes := make([]*network.Node, 0, len(dbNodes))
 	for i, dbNode := range dbNodes {
 		labels := labelsList[i]
-		nodeType, ok := labelToNodeType(labels)
+		nodeType, ok := labelToNodeType(labels) // 使用从DB获取的label来确定类型
 		if !ok {
 			nodeID := getStringProp(dbNode.Props, "id", "[未知ID]")
 			fmt.Printf("WARN: Repo: 搜索结果中无法识别节点 (id: %s) 的标签: %v\n", nodeID, labels) // TODO: 使用日志库

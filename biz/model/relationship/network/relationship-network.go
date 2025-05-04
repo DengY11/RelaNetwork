@@ -2928,8 +2928,8 @@ func (p *DeleteNodeResponse) String() string {
 
 // 搜索节点请求
 type SearchNodesRequest struct {
-	// 搜索关键词
-	Keyword string `thrift:"keyword,1" form:"keyword" json:"keyword" query:"keyword"`
+	// 新增: 搜索条件 (key: 属性名, value: 搜索值)
+	Criteria map[string]string `thrift:"criteria,1,optional" form:"criteria" json:"criteria,omitempty" query:"criteria"`
 	// 节点类型(可选)
 	Type *NodeType `thrift:"type,2,optional" form:"type" json:"type,omitempty" query:"type"`
 	// 限制返回数量
@@ -2945,8 +2945,13 @@ func NewSearchNodesRequest() *SearchNodesRequest {
 func (p *SearchNodesRequest) InitDefault() {
 }
 
-func (p *SearchNodesRequest) GetKeyword() (v string) {
-	return p.Keyword
+var SearchNodesRequest_Criteria_DEFAULT map[string]string
+
+func (p *SearchNodesRequest) GetCriteria() (v map[string]string) {
+	if !p.IsSetCriteria() {
+		return SearchNodesRequest_Criteria_DEFAULT
+	}
+	return p.Criteria
 }
 
 var SearchNodesRequest_Type_DEFAULT NodeType
@@ -2977,10 +2982,14 @@ func (p *SearchNodesRequest) GetOffset() (v int32) {
 }
 
 var fieldIDToName_SearchNodesRequest = map[int16]string{
-	1: "keyword",
+	1: "criteria",
 	2: "type",
 	3: "limit",
 	4: "offset",
+}
+
+func (p *SearchNodesRequest) IsSetCriteria() bool {
+	return p.Criteria != nil
 }
 
 func (p *SearchNodesRequest) IsSetType() bool {
@@ -3014,7 +3023,7 @@ func (p *SearchNodesRequest) Read(iprot thrift.TProtocol) (err error) {
 
 		switch fieldId {
 		case 1:
-			if fieldTypeId == thrift.STRING {
+			if fieldTypeId == thrift.MAP {
 				if err = p.ReadField1(iprot); err != nil {
 					goto ReadFieldError
 				}
@@ -3075,14 +3084,32 @@ ReadStructEndError:
 }
 
 func (p *SearchNodesRequest) ReadField1(iprot thrift.TProtocol) error {
-
-	var _field string
-	if v, err := iprot.ReadString(); err != nil {
+	_, _, size, err := iprot.ReadMapBegin()
+	if err != nil {
 		return err
-	} else {
-		_field = v
 	}
-	p.Keyword = _field
+	_field := make(map[string]string, size)
+	for i := 0; i < size; i++ {
+		var _key string
+		if v, err := iprot.ReadString(); err != nil {
+			return err
+		} else {
+			_key = v
+		}
+
+		var _val string
+		if v, err := iprot.ReadString(); err != nil {
+			return err
+		} else {
+			_val = v
+		}
+
+		_field[_key] = _val
+	}
+	if err := iprot.ReadMapEnd(); err != nil {
+		return err
+	}
+	p.Criteria = _field
 	return nil
 }
 func (p *SearchNodesRequest) ReadField2(iprot thrift.TProtocol) error {
@@ -3161,14 +3188,27 @@ WriteStructEndError:
 }
 
 func (p *SearchNodesRequest) writeField1(oprot thrift.TProtocol) (err error) {
-	if err = oprot.WriteFieldBegin("keyword", thrift.STRING, 1); err != nil {
-		goto WriteFieldBeginError
-	}
-	if err := oprot.WriteString(p.Keyword); err != nil {
-		return err
-	}
-	if err = oprot.WriteFieldEnd(); err != nil {
-		goto WriteFieldEndError
+	if p.IsSetCriteria() {
+		if err = oprot.WriteFieldBegin("criteria", thrift.MAP, 1); err != nil {
+			goto WriteFieldBeginError
+		}
+		if err := oprot.WriteMapBegin(thrift.STRING, thrift.STRING, len(p.Criteria)); err != nil {
+			return err
+		}
+		for k, v := range p.Criteria {
+			if err := oprot.WriteString(k); err != nil {
+				return err
+			}
+			if err := oprot.WriteString(v); err != nil {
+				return err
+			}
+		}
+		if err := oprot.WriteMapEnd(); err != nil {
+			return err
+		}
+		if err = oprot.WriteFieldEnd(); err != nil {
+			goto WriteFieldEndError
+		}
 	}
 	return nil
 WriteFieldBeginError:
