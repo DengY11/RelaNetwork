@@ -18,7 +18,7 @@ services:
       # NEO4J_dbms_security_auth__minimum__password__length: 1
       # NEO4J_dbms_security_auth__enabled: false # 完全禁用认证 (不推荐，除非有特殊原因)
     # volumes:
-      # 可选：如果你希望在 docker-compose down/up 之间持久化数据，请取消注释以下行
+      # 可选：如果你希望在 docker compose down/up 之间持久化数据，请取消注释以下行
       # - neo4j_data:/data
       # - neo4j_logs:/logs
       # - neo4j_import:/var/lib/neo4j/import

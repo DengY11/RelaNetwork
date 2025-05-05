@@ -744,16 +744,42 @@ hz update -idl api/protos/relationship-network.thrift
 
 ### 8.4 测试
 
-```bash
-# 运行单元测试
-go test ./...
+项目包含不同层级的测试，以确保代码质量和功能正确性：
 
-# 使用curl测试API
+- **单元测试 (Unit Tests)**:
+    - 主要针对 DAL 层和部分 Service/Repo 层的纯逻辑单元。
+    - 使用 `stretchr/testify/mock` 等库模拟依赖项（如数据库会话），隔离被测单元。
+    - 运行快速，不依赖外部服务。
+    - 执行命令: `go test ./biz/dal/...` (示例)
+
+- **集成测试 (Integration Tests)**:
+    - 主要针对 Repo 层和 Service 层。
+    - 需要连接**真实的 Neo4j 和 Redis 实例**来验证数据交互和缓存逻辑。
+    - 确保在运行前已启动并配置好 Neo4j 和 Redis (参照 7.1 环境要求 和 7.2 配置说明)。
+    - 覆盖数据创建、读取、更新、删除 (CRUD) 以及缓存命中/失效等场景。
+    - 执行命令: `go test ./biz/repo/neo4jrepo -v` 或 `go test ./biz/service -v` (示例)
+
+- **端到端测试 (End-to-End Tests)** (可选):
+    - 可以使用 `curl` 或其他 HTTP 客户端工具，直接调用运行中服务的 API 端点，验证完整流程。
+
+**运行所有测试**:
+```bash
+# 运行项目下的所有测试 (包括单元和集成测试)
+# 确保 Neo4j 和 Redis 正在运行并已配置
+go test ./...
+```
+
+**使用 curl 进行基本 API 测试**:
+```bash
+# 示例：创建节点
 curl -X POST http://localhost:8888/api/v1/nodes -d '{
   "type": 1,
   "name": "测试用户",
   "profession": "开发者"
-}'
+}' -H "Content-Type: application/json"
+
+# 示例：获取节点 (将 :id 替换为实际 ID)
+curl http://localhost:8888/api/v1/nodes/:id
 ```
 
 ## 9. 使用示例

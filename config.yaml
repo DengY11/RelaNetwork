@@ -16,13 +16,13 @@ database:
 # 缓存配置
 cache:
   prefix: "labelwall:"            # Redis 缓存键前缀
-  estimated_keys: 100000          # 预估键数量 (用于布隆过滤器等)
+  estimated_keys: 1000000          # 预估键数量 (用于布隆过滤器等)
   fp_rate: 0.01                   # 允许的误判率 (用于布隆过滤器等)
   ttl:                            # 缓存过期时间 (秒)
     default_node: 3600            # 节点默认 TTL (1 小时)
     default_relation: 1800        # 关系默认 TTL (30 分钟)
     search_nodes: 300             # 节点搜索结果 TTL (5 分钟)
-    get_network: 600              # 网络图谱结果 TTL (10 分钟)
+    get_network: 3600              # 网络图谱结果 TTL (60 分钟)
     get_path: 900                 # 路径查询结果 TTL (15 分钟)
     get_node_relations: 300       # 节点关系列表 TTL (5 分钟)
     # 注意：空值/占位符的 TTL 通常较短，由 cache 包内部定义或在此单独配置
