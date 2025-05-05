@@ -14,6 +14,7 @@ type AppConfig struct {
 	Database DatabaseConfig `mapstructure:"database"`
 	Cache    CacheConfig    `mapstructure:"cache"`
 	Logging  LoggingConfig  `mapstructure:"logging"`
+	Repo     RepoConfig     `mapstructure:"repository"`
 }
 
 // ServerConfig 服务器相关配置
@@ -43,9 +44,35 @@ type RedisConfig struct {
 
 // CacheConfig 缓存相关配置
 type CacheConfig struct {
-	Prefix        string  `mapstructure:"prefix"`
-	EstimatedKeys uint    `mapstructure:"estimated_keys"` // 注意：类型是 uint
-	FpRate        float64 `mapstructure:"fp_rate"`
+	Prefix        string         `mapstructure:"prefix"`
+	EstimatedKeys uint           `mapstructure:"estimated_keys"`
+	FpRate        float64        `mapstructure:"fp_rate"`
+	TTL           CacheTTLConfig `mapstructure:"ttl"`
+}
+
+// CacheTTLConfig 缓存过期时间配置 (单位：秒)
+type CacheTTLConfig struct {
+	DefaultNode      int `mapstructure:"default_node"`
+	DefaultRelation  int `mapstructure:"default_relation"`
+	SearchNodes      int `mapstructure:"search_nodes"`
+	GetNetwork       int `mapstructure:"get_network"`
+	GetPath          int `mapstructure:"get_path"`
+	GetNodeRelations int `mapstructure:"get_node_relations"`
+	// EmptyPlaceholder int `mapstructure:"empty_placeholder"` // 如需配置空值 TTL
+}
+
+// RepoConfig 仓库层相关配置
+type RepoConfig struct {
+	QueryParams RepoQueryConfig `mapstructure:"query_params"`
+}
+
+// RepoQueryConfig 仓库查询参数配置
+type RepoQueryConfig struct {
+	GetNetworkMaxDepth           int `mapstructure:"get_network_max_depth"`
+	GetPathMaxDepth              int `mapstructure:"get_path_max_depth"`
+	GetPathMaxDepthLimit         int `mapstructure:"get_path_max_depth_limit"`
+	SearchNodesDefaultLimit      int `mapstructure:"search_nodes_default_limit"`
+	GetNodeRelationsDefaultLimit int `mapstructure:"get_node_relations_default_limit"`
 }
 
 // LoggingConfig 日志相关配置

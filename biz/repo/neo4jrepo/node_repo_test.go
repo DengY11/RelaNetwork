@@ -117,9 +117,9 @@ func TestMain(m *testing.M) {
 
 	// --- Setup Repositories ---
 	// Create RelationRepo first as NodeRepo depends on it
-	relationRepoInstance := neo4jrepo.NewRelationRepository(testDriver, relationDal, relationCacheImpl) // Use the specific cache impl
+	relationRepoInstance := neo4jrepo.NewRelationRepository(testDriver, relationDal, relationCacheImpl, 300, 1000) // Use the specific cache impl, add default params
 	// Create NodeRepo, injecting the created RelationRepo
-	nodeRepoInstance := neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, relationRepoInstance)
+	nodeRepoInstance := neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, relationRepoInstance, 300, 100, 500, 100, 100, 3, 5, 1000) // Add default params
 
 	// --- Assign to Global Test Variables (for node_repo_test.go) ---
 	testRepo = nodeRepoInstance
@@ -640,15 +640,16 @@ func TestSearchNodes_Integration(t *testing.T) {
 		require.NoError(t, err, "Failed to create node for search test: %s", node.ID)
 	}
 	// Pre-cache Alice Smith for later tests
-	_, err := testRepo.GetNode(ctx, "search-p1")
+	var err error
+	_, err = testRepo.GetNode(ctx, "search-p1")
 	require.NoError(t, err)
 
-	// --- Test Case 1: Search by keyword (PERSON, "Smith") - Cache Miss ---
+	// --- Test Case 1: Search by keyword (PERSON, "Alice Smith") - Cache Miss ---
 	t.Run("Search Keyword Cache Miss", func(t *testing.T) {
 		searchReq := &network.SearchNodesRequest{
 			Type: nodeTypePtr(network.NodeType_PERSON), // Pass pointer
 			// Use Criteria map instead of Keyword
-			Criteria: map[string]string{"name": "Smith"},
+			Criteria: map[string]string{"name": "Alice Smith"},
 			Limit:    func(i int32) *int32 { return &i }(10),
 			Offset:   func(i int32) *int32 { return &i }(0),
 		}
@@ -681,12 +682,12 @@ func TestSearchNodes_Integration(t *testing.T) {
 		assert.Equal(t, "search-p1", cachedValue.NodeIDs[0])
 	})
 
-	// --- Test Case 2: Search by keyword (PERSON, "Smith") - Cache Hit ---
+	// --- Test Case 2: Search by keyword (PERSON, "Alice Smith") - Cache Hit ---
 	t.Run("Search Keyword Cache Hit", func(t *testing.T) {
 		searchReq := &network.SearchNodesRequest{
 			Type: nodeTypePtr(network.NodeType_PERSON), // Pass pointer
 			// Use Criteria map
-			Criteria: map[string]string{"name": "Smith"},
+			Criteria: map[string]string{"name": "Alice Smith"},
 			Limit:    func(i int32) *int32 { return &i }(10),
 			Offset:   func(i int32) *int32 { return &i }(0),
 		}
@@ -801,7 +802,7 @@ func TestSearchNodes_Integration(t *testing.T) {
 		searchReq := &network.SearchNodesRequest{
 			Type: nodeTypePtr(network.NodeType_COMPANY), // Pass pointer
 			// Use Criteria map
-			Criteria: map[string]string{"name": "Corp"},
+			Criteria: map[string]string{"name": "Alpha Corp"},
 			Limit:    func(i int32) *int32 { return &i }(10),
 			Offset:   func(i int32) *int32 { return &i }(0),
 		}

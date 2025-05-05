@@ -132,8 +132,8 @@ func TestMain(m *testing.M) {
 	relationDal := neo4jdal.NewRelationDAL()
 
 	// --- Setup Repositories ---
-	testRelRepo = neo4jrepo.NewRelationRepository(testDriver, relationDal, redisCacheImpl)       // Pass concrete cache impl
-	testNodeRepo = neo4jrepo.NewNodeRepository(testDriver, nodeDal, redisCacheImpl, testRelRepo) // Pass concrete cache impl & relRepo
+	testRelRepo = neo4jrepo.NewRelationRepository(testDriver, relationDal, redisCacheImpl, 300, 1000)                                 // Pass concrete cache impl, add default params
+	testNodeRepo = neo4jrepo.NewNodeRepository(testDriver, nodeDal, redisCacheImpl, testRelRepo, 300, 100, 500, 100, 100, 3, 5, 1000) // Pass concrete cache impl & relRepo, add default params
 
 	// --- Setup Service ---
 	testService = service.NewNetworkService(testNodeRepo, testRelRepo) // Inject real repos

@@ -137,22 +137,6 @@ func (d *neo4jNodeDAL) ExecUpdateNode(ctx context.Context, session neo4j.Session
 	_, err := session.ExecuteWrite(ctx, func(tx neo4j.ManagedTransaction) (any, error) {
 		// 1. 检查节点是否存在
 		// 现在已改为调用 ExecUpdateNode 之前由 Repo 层检查，或者允许更新操作本身在节点不存在时静默失败或由 Cypher 处理
-		/* // 暂时注释掉内部的存在性检查，依赖 Cypher 的 MATCH 行为
-		existsQuery := "MATCH (n{id: $id}) RETURN count(n) AS cnt"
-		existsResult, err := tx.Run(ctx, existsQuery, map[string]any{"id": id})
-		if err != nil {
-			return nil, fmt.Errorf("DAL: 检查节点存在性失败: %w", err)
-		}
-		recordExists, err := existsResult.Single(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("DAL: 获取节点存在性结果失败: %w", err)
-		}
-		count, _ := recordExists.Get("count")
-		if count.(int64) == 0 {
-			// 如果节点不存在，Neo4j 的 MATCH..SET..RETURN 会失败，错误会由后续的 result.Single() 捕获
-			// return nil, fmt.Errorf("DAL: 节点ID %s 不存在", id) // 返回特定错误可能更好
-		}
-		*/
 
 		// 2. 构建更新查询
 		var setClauses []string
@@ -162,9 +146,6 @@ func (d *neo4jNodeDAL) ExecUpdateNode(ctx context.Context, session neo4j.Session
 			setClauses = append(setClauses, fmt.Sprintf("n.%s = $%s", key, paramName))
 			params[paramName] = value
 		}
-		// updated_at 已由 repo 层传入 updates map，无需在此处重复添加
-		// setClauses = append(setClauses, "n.updated_at = $now")
-		// params["now"] = time.Now().UTC()
 
 		// 如果没有要更新的属性（例如只更新 updated_at），setClauses 会为空，需要处理
 		if len(setClauses) == 0 {
@@ -293,8 +274,18 @@ func (d *neo4jNodeDAL) ExecDeleteNode(ctx context.Context, session neo4j.Session
 
 // ExecSearchNodes 执行搜索节点的 Cypher，返回匹配的节点、标签列表和总数。
 func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.SessionWithContext, criteria map[string]string, nodeType *network.NodeType, limit, offset int64) ([]neo4j.Node, [][]string, int64, error) {
-	var matchClause string
-	var whereClauses []string
+	// --- Remove Debug Logging --- VVV
+	/*
+		var nodeTypeStr string
+		if nodeType != nil {
+			nodeTypeStr = nodeType.String()
+		} else {
+			nodeTypeStr = "<nil>"
+		}
+		fmt.Printf("DEBUG DAL: ExecSearchNodes called with criteria=%v, nodeType=%s, limit=%d, offset=%d\n", criteria, nodeTypeStr, limit, offset)
+	*/
+	// --- End Remove Debug Logging ---
+
 	// Base params map for the main query, including pagination
 	mainParams := map[string]any{
 		"limit":  limit,
@@ -303,25 +294,48 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 	// Separate params map for the count query, initially empty or with only criteria params
 	countParams := make(map[string]any)
 
+	// --- Restore original MATCH logic --- VVV
+	var matchClause string
+	var whereClauses []string // Restore whereClauses
+
+	// --- Restore original MATCH logic --- VVV
 	if nodeType != nil {
 		matchClause = fmt.Sprintf("MATCH (n:%s)", nodeType.String())
 	} else {
 		matchClause = "MATCH (n)"
 	}
+	// --- Remove DEBUG comments ---
+	/*
+		// --- DEBUG: Hardcode label for PERSON type --- VVV
+		if nodeType != nil {
+			if *nodeType == network.NodeType_PERSON {
+				matchClause = "MATCH (n:PERSON)" // Hardcode PERSON label
+			} else {
+				matchClause = fmt.Sprintf("MATCH (n:%s)", nodeType.String())
+			}
+		} else {
+			matchClause = "MATCH (n)"
+		}
+		// --- End DEBUG ---
+	*/
 
 	propIdx := 0
 	for key, value := range criteria {
+		// --- Revert: Use Parameterized query --- VVV
 		paramName := fmt.Sprintf("prop_%d", propIdx)
 		whereClauses = append(whereClauses, fmt.Sprintf("n.%s = $%s", key, paramName))
 		// Add criteria params to BOTH maps
 		mainParams[paramName] = value
 		countParams[paramName] = value
+
 		propIdx++
 	}
+	// --- End Revert --- ^^^
 
 	// Build count query string
 	countQueryBuilder := strings.Builder{}
-	countQueryBuilder.WriteString(matchClause)
+	countQueryBuilder.WriteString(matchClause) // Use restored matchClause
+	// Restore WHERE clause logic
 	if len(whereClauses) > 0 {
 		countQueryBuilder.WriteString(" WHERE ")
 		countQueryBuilder.WriteString(strings.Join(whereClauses, " AND "))
@@ -331,13 +345,14 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 
 	// Build main query string
 	queryBuilder := strings.Builder{}
-	queryBuilder.WriteString(matchClause)
+	queryBuilder.WriteString(matchClause) // Use restored matchClause
+	// Restore WHERE clause logic
 	if len(whereClauses) > 0 {
 		queryBuilder.WriteString(" WHERE ")
 		queryBuilder.WriteString(strings.Join(whereClauses, " AND "))
 	}
 	queryBuilder.WriteString(" RETURN DISTINCT n, labels(n) AS labels")
-	queryBuilder.WriteString(" ORDER BY n.name")
+	queryBuilder.WriteString(" ORDER BY n.name") // Keep ordering
 	queryBuilder.WriteString(" SKIP $offset LIMIT $limit")
 	finalQuery := queryBuilder.String()
 
@@ -379,6 +394,7 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 		}
 
 		// Run the main query to get paginated nodes using mainParams (with limit/offset)
+		// Restore using mainParams directly as parameter logic is reverted
 		result, err := tx.Run(ctx, finalQuery, mainParams) // <<< Use mainParams
 		if err != nil {
 			return nil, fmt.Errorf("DAL: running main search query failed: %w", err)

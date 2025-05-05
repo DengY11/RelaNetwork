@@ -21,31 +21,47 @@ import (
 	"labelwall/pkg/cache" // 引入缓存包
 )
 
+// 保留与 TTL 无关的常量
 const (
-	// 默认关系缓存时间
-	defaultRelationTTL = 30 * time.Minute // 关系可能不如节点稳定，TTL 短一些
-
-	getNodeRelationsCachePrefix = "relation:list:ids:"
-	getNodeRelationsCacheTTL    = 5 * time.Minute // 关系列表缓存时间不宜过长
-	// 空关系列表结果标记及 TTL
-	getNodeRelationsEmptyPlaceholder = "__EMPTY_REL_LIST__"
-	getNodeRelationsEmptyTTL         = 1 * time.Minute
+	getNodeRelationsCachePrefix      = "relation:list:ids:" // 缓存键前缀
+	getNodeRelationsEmptyPlaceholder = "__EMPTY_REL_LIST__" // 空结果占位符
 )
+
+// 默认关系缓存时间
+// defaultRelationTTL = 30 * time.Minute // 移除常量
+
+// getNodeRelationsCachePrefix = "relation:list:ids:" // 保留前缀常量
+// getNodeRelationsCacheTTL    = 5 * time.Minute // 移除 TTL 常量
+// 空关系列表结果标记及 TTL
+// getNodeRelationsEmptyPlaceholder = "__EMPTY_REL_LIST__" // 保留占位符
+// getNodeRelationsEmptyTTL         = 1 * time.Minute // 由 cache 包处理或后续看是否配置
 
 // neo4jRelationRepo 实现了 RelationRepository 接口
 type neo4jRelationRepo struct {
 	driver      neo4j.DriverWithContext
 	relationDAL neo4jdal.RelationDAL
-	// 使用组合后的缓存接口
-	cache cache.RelationAndByteCache
+	cache       cache.RelationAndByteCache
+	// 添加配置字段
+	defaultTTL          time.Duration
+	getNodeRelationsTTL time.Duration
 }
 
 // NewRelationRepository 创建一个新的 RelationRepository 实例
-func NewRelationRepository(driver neo4j.DriverWithContext, relationDAL neo4jdal.RelationDAL, cache cache.RelationAndByteCache) RelationRepository {
+// 添加 TTL 参数 (秒)
+func NewRelationRepository(
+	driver neo4j.DriverWithContext,
+	relationDAL neo4jdal.RelationDAL,
+	cache cache.RelationAndByteCache,
+	defaultTTLSeconds int,
+	getNodeRelationsTTLSeconds int,
+) RelationRepository {
 	return &neo4jRelationRepo{
 		driver:      driver,
 		relationDAL: relationDAL,
-		cache:       cache, // 存储缓存实例
+		cache:       cache,
+		// 将秒转换为 time.Duration
+		defaultTTL:          time.Duration(defaultTTLSeconds) * time.Second,
+		getNodeRelationsTTL: time.Duration(getNodeRelationsTTLSeconds) * time.Second,
 	}
 }
 
@@ -129,7 +145,8 @@ func (r *neo4jRelationRepo) GetRelation(ctx context.Context, id string) (*networ
 
 	// 4. 存入缓存 (使用 r.cache)
 	if r.cache != nil && resultRel != nil {
-		setErr := r.cache.SetRelation(ctx, id, resultRel, defaultRelationTTL)
+		// 使用配置的 TTL
+		setErr := r.cache.SetRelation(ctx, id, resultRel, r.defaultTTL)
 		if setErr != nil {
 			fmt.Printf("WARN: Repo: 缓存设置关系失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
 		}
@@ -313,15 +330,17 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 	// 6. 缓存结果
 	if err == nil {
 		if len(dbRels) == 0 {
-			// 6.1 缓存空标记
-			setErr := r.cache.Set(ctx, cacheKey, []byte(getNodeRelationsEmptyPlaceholder), getNodeRelationsEmptyTTL)
+			// 6.1 缓存空标记 (使用 cache 包的 NilValueTTL 或单独配置)
+			// 注意：之前的 getNodeRelationsEmptyTTL 常量已被移除
+			// 依赖 cache 包内部的 NilValueTTL 或需要从配置传入
+			setErr := r.cache.Set(ctx, cacheKey, []byte(getNodeRelationsEmptyPlaceholder), cache.NilValueTTL) // 假设使用 cache.NilValueTTL
 			if setErr != nil {
 				fmt.Printf("ERROR: Repo: GetNodeRelations cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
 			} else {
 				fmt.Printf("INFO: Repo: GetNodeRelations set empty placeholder to cache (Key: %s)\n", cacheKey) // TODO: Use logger
 			}
 		} else {
-			// 6.2 提取 ID 并缓存
+			// 6.2 提取 ID 并缓存 (使用配置的 TTL)
 			relationIDs := make([]string, 0, len(dbRels))
 			for _, dbRel := range dbRels {
 				if relID := getStringProp(dbRel.Props, "id", ""); relID != "" {
@@ -334,11 +353,12 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 
 			cacheValue := getNodeRelationsCacheValue{
 				RelationIDs: relationIDs,
-				Total:       int32(total), // total 来自 DirectAndRaw 的返回值
+				Total:       int32(total),
 			}
 			var buffer bytes.Buffer
 			if encErr := json.NewEncoder(&buffer).Encode(cacheValue); encErr == nil {
-				setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), getNodeRelationsCacheTTL)
+				// 使用配置的 getNodeRelationsTTL
+				setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), r.getNodeRelationsTTL)
 				if setErr != nil {
 					fmt.Printf("ERROR: Repo: GetNodeRelations cache set failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
 				} else {

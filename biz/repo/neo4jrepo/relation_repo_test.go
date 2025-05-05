@@ -45,28 +45,52 @@ func nodeTypePtrRelTest(t network.NodeType) *network.NodeType {
 // clearRelationTestData cleans Neo4j and Redis for relation tests
 func clearRelationTestData(ctx context.Context) {
 	// Clear Neo4j (same as node tests)
+	if relTestDriver == nil {
+		fmt.Println("Warning: relTestDriver not initialized in clearRelationTestData")
+		return
+	}
 	session := relTestDriver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeWrite})
 	_, _ = session.Run(ctx, "MATCH ()-[r]->() DELETE r", nil)
 	_, _ = session.Run(ctx, "MATCH (n) DELETE n", nil)
 	session.Close(ctx)
 
-	// Clear Redis DB 1 (or specific prefixes)
+	// --- Use the same Redis clearing logic as node_repo_test --- VVV
+	if relTestCacheClient == nil {
+		fmt.Println("Warning: relTestCacheClient not initialized, cannot clear Redis cache.")
+		return
+	}
+	// Use the EXPORTED constants from neo4jrepo package and the correct prefix
+	basePrefix := "testprefix:" // Assuming relation tests use the same prefix as node tests
+	prefixesToClear := []string{
+		basePrefix + neo4jrepo.NodeCachePrefix + "*",          // Node details
+		basePrefix + neo4jrepo.RelationCachePrefix + "*",      // Relation details
+		basePrefix + neo4jrepo.SearchNodesCachePrefix + "*",   // Search results IDs (might be set by node repo)
+		basePrefix + neo4jrepo.GetNetworkCachePrefix + "*",    // Network graph IDs (might be set by node repo)
+		basePrefix + neo4jrepo.GetPathCachePrefix + "*",       // Path IDs (might be set by node repo)
+		basePrefix + neo4jrepo.NodeRelationsCachePrefix + "*", // NodeRelations IDs (set by relation repo)
+		// Add specific prefixes for relation repo if any others exist
+	}
+
+	for _, prefix := range prefixesToClear {
+		keys, err := relTestCacheClient.Keys(ctx, prefix).Result()
+		if err == nil && len(keys) > 0 {
+			pipe := relTestCacheClient.Pipeline()
+			pipe.Del(ctx, keys...)
+			_, err := pipe.Exec(ctx)
+			if err != nil && !errors.Is(err, redis.Nil) { // Ignore nil error if keys expired between KEYS and DEL
+				fmt.Printf("Warning: Failed to clear Redis keys with prefix %s: %v\n", prefix, err)
+			}
+		} else if err != nil && !errors.Is(err, redis.Nil) {
+			fmt.Printf("Warning: Failed to get Redis keys with prefix %s: %v\n", prefix, err)
+		}
+	}
+	// --- End Redis clearing logic ---
+
+	/* // Original FlushDB logic commented out
 	err := relTestCacheClient.FlushDB(ctx).Err()
 	if err != nil {
 		fmt.Printf("Warning: Failed to flush Redis DB 1: %v\n", err)
 	}
-	// If not using a separate DB, use prefix clearing:
-	/*
-		prefixesToClear := []string{
-			"testrelprefix:node:*",             // Node details (if node repo uses this cache)
-			"testrelprefix:relation:*",         // Relation details
-			"testrelprefix:" + neo4jrepo.GetNodeRelationsCachePrefix + "*", // Relation list IDs
-			// Add other prefixes if used by relation repo logic
-		}
-		for _, prefix := range prefixesToClear {
-			keys, err := testRelCacheClient.Keys(ctx, prefix).Result()
-			// ... (rest of the key deletion logic from node_repo_test) ...
-		}
 	*/
 }
 

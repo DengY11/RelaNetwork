@@ -50,7 +50,7 @@ func Init(configPath string) (*server.Hertz, error) {
 	log.Println("Info: DAL 初始化完成.")
 
 	// 5. 初始化 Repositories
-	nodeRepo, relationRepo := InitRepositories(driver, appCache, nodeDAL, relationDAL)
+	nodeRepo, relationRepo := InitRepositories(driver, appCache, nodeDAL, relationDAL, &cfg.Cache, &cfg.Repo)
 	log.Println("Info: Repositories 初始化完成.")
 
 	// 6. 初始化 Service
@@ -123,20 +123,50 @@ func InitDALs() (neo4jdal.NodeDAL, neo4jdal.RelationDAL) {
 	return nodeDAL, relationDAL
 }
 
-func InitRepositories(driver neo4j.DriverWithContext, appCache cache.NodeAndByteCache, nodeDAL neo4jdal.NodeDAL, relationDAL neo4jdal.RelationDAL) (neo4jrepo.NodeRepository, neo4jrepo.RelationRepository) {
+// InitRepositories 初始化仓库层
+// 注入配置参数
+func InitRepositories(
+	driver neo4j.DriverWithContext,
+	appCache cache.NodeAndByteCache,
+	nodeDAL neo4jdal.NodeDAL,
+	relationDAL neo4jdal.RelationDAL,
+	cacheCfg *config.CacheConfig, // 缓存配置
+	repoCfg *config.RepoConfig, // 仓库配置
+) (neo4jrepo.NodeRepository, neo4jrepo.RelationRepository) {
 	// 类型断言：确保 appCache (其底层类型是 *RedisCache) 满足所需的接口
 	relationCache, okRel := appCache.(cache.RelationAndByteCache)
 	if !okRel {
-		// 如果断言失败，意味着 NewRedisCache 的实现不满足接口，这是严重错误
 		log.Fatal("严重: 初始化缓存未正确实现 RelationAndByteCache 接口")
 	}
-	nodeCache, okNode := appCache.(cache.NodeAndByteCache) // 这个断言总是成功的，因为 appCache 类型就是它
+	nodeCache, okNode := appCache.(cache.NodeAndByteCache) // 这个断言总是成功的
 	if !okNode {
 		log.Fatal("严重: 初始化缓存未正确实现 NodeAndByteCache 接口 (逻辑错误)")
 	}
 
-	relationRepo := neo4jrepo.NewRelationRepository(driver, relationDAL, relationCache)
-	nodeRepo := neo4jrepo.NewNodeRepository(driver, nodeDAL, nodeCache, relationRepo)
+	// 创建 RelationRepository 时传入 TTL 配置
+	relationRepo := neo4jrepo.NewRelationRepository(
+		driver,
+		relationDAL,
+		relationCache,
+		cacheCfg.TTL.DefaultRelation,
+		cacheCfg.TTL.GetNodeRelations,
+	)
+
+	// 创建 NodeRepository 时传入 TTL 和查询参数配置
+	nodeRepo := neo4jrepo.NewNodeRepository(
+		driver,
+		nodeDAL,
+		nodeCache,
+		relationRepo,
+		cacheCfg.TTL.DefaultNode,
+		cacheCfg.TTL.SearchNodes,
+		cacheCfg.TTL.GetNetwork,
+		cacheCfg.TTL.GetPath,
+		repoCfg.QueryParams.GetNetworkMaxDepth,
+		repoCfg.QueryParams.GetPathMaxDepth,
+		repoCfg.QueryParams.GetPathMaxDepthLimit,
+		repoCfg.QueryParams.SearchNodesDefaultLimit,
+	)
 	return nodeRepo, relationRepo
 }
 
