@@ -169,15 +169,15 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 		cachedNode, err := r.cache.GetNode(ctx, id)
 		if err == nil {
 			// 缓存命中
-			fmt.Printf("Repo: GetNode cache hit for id: %s\n", id) // TODO: 使用日志库
+			//fmt.Printf("Repo: GetNode cache hit for id: %s\n", id) // TODO: 使用日志库
 			return cachedNode, nil
 		} else if errors.Is(err, cache.ErrNilValue) {
 			// 缓存命中，但存的是空值 (表示 DB 中不存在)
-			fmt.Printf("Repo: GetNode cache hit with nil value for id: %s\n", id) // TODO: 使用日志库
-			return nil, err                                                       // 返回 cache.ErrNilValue 或 repo 层的 NotFound 错误
+			//fmt.Printf("Repo: GetNode cache hit with nil value for id: %s\n", id) // TODO: 使用日志库
+			return nil, err // 返回 cache.ErrNilValue 或 repo 层的 NotFound 错误
 		} else if !errors.Is(err, cache.ErrNotFound) {
 			// 缓存读取发生错误 (非 NotFound)
-			fmt.Printf("WARN: Repo: 缓存获取节点失败 (id: %s): %v\n", id, err) // TODO: 使用日志库
+			//fmt.Printf("WARN: Repo: 缓存获取节点失败 (id: %s): %v\n", id, err) // TODO: 使用日志库
 			// 缓存出错，继续尝试从数据库获取，但要记录错误
 		}
 		// 如果是 cache.ErrNotFound，则继续执行数据库查询
