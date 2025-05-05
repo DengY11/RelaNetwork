@@ -4,80 +4,90 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"labelwall/biz/dal/neo4jdal"
 	"labelwall/biz/handler/relationship/network" // 导入 handler 包
 	"labelwall/biz/repo/neo4jrepo"
 	"labelwall/biz/service"
+	dbInfra "labelwall/infrastructure/database" // Alias database package
 	"labelwall/pkg/cache"
 	"labelwall/pkg/config" // 导入配置包
 
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap" // 添加 zap 导入
 )
 
 // Init 函数执行所有应用程序的初始化步骤
 func Init(configPath string) (*server.Hertz, error) {
+	// 0. 初始化 Zap Logger
+	logger, err := zap.NewProduction() // 或者 zap.NewDevelopment()
+	if err != nil {
+		log.Fatalf("无法初始化 zap logger: %v", err) // 初始 logger 失败时仍用 log
+	}
+	defer logger.Sync() // 确保缓冲区日志被写入
+
 	// 1. 加载配置
 	cfg, err := config.InitConfig(configPath)
 	if err != nil {
+		logger.Error("加载配置失败", zap.Error(err))
 		return nil, fmt.Errorf("加载配置失败: %w", err)
 	}
-	// TODO: 初始化日志库 (例如根据 cfg.Logging.Level)
-	log.Println("Info: 配置加载完成.")
+	logger.Info("配置加载完成.")
 
 	// 2. 初始化数据库连接
-	driver, err := InitDatabase(&cfg.Database.Neo4j)
+	// 将 logger 传递给数据库初始化函数
+	driver, err := InitDatabase(logger, &cfg.Database.Neo4j)
 	if err != nil {
+		logger.Error("初始化 Neo4j 失败", zap.Error(err))
 		return nil, fmt.Errorf("初始化 Neo4j 失败: %w", err)
 	}
-	redisClient, err := InitRedis(&cfg.Database.Redis)
+	redisClient, err := InitRedis(logger, &cfg.Database.Redis)
 	if err != nil {
+		logger.Error("初始化 Redis 失败", zap.Error(err))
 		return nil, fmt.Errorf("初始化 Redis 失败: %w", err)
 	}
-	log.Println("Info: 数据库连接初始化完成.")
+	logger.Info("数据库连接初始化完成.")
 
 	// 3. 初始化缓存
-	appCache, err := InitCache(redisClient, &cfg.Cache)
+	appCache, err := InitCache(logger, redisClient, &cfg.Cache)
 	if err != nil {
+		logger.Error("初始化缓存失败", zap.Error(err))
 		return nil, fmt.Errorf("初始化缓存失败: %w", err)
 	}
-	log.Println("Info: 缓存初始化完成.")
+	logger.Info("缓存初始化完成.")
 
 	// 4. 初始化 DAL
-	nodeDAL, relationDAL := InitDALs()
-	log.Println("Info: DAL 初始化完成.")
+	nodeDAL, relationDAL := InitDALs(logger)
+	logger.Info("DAL 初始化完成.")
 
 	// 5. 初始化 Repositories
-	nodeRepo, relationRepo := InitRepositories(driver, appCache, nodeDAL, relationDAL, &cfg.Cache, &cfg.Repo)
-	log.Println("Info: Repositories 初始化完成.")
+	nodeRepo, relationRepo := InitRepositories(logger, driver, appCache, nodeDAL, relationDAL, &cfg.Cache, &cfg.Repo)
+	logger.Info("Repositories 初始化完成.")
 
 	// 6. 初始化 Service
-	networkSvc := InitService(nodeRepo, relationRepo)
-	log.Println("Info: Service 初始化完成.")
+	networkSvc := InitService(logger, nodeRepo, relationRepo)
+	logger.Info("Service 初始化完成.")
 
 	// 7. 注入依赖到 Handler
-	InjectDependencies(networkSvc)
-	log.Println("Info: 依赖注入 Handler 完成.")
+	InjectDependencies(logger, networkSvc)
+	logger.Info("依赖注入 Handler 完成.")
 
 	// 8. 初始化 Hertz 服务器 (不包括路由注册)
 	h := server.New(
 		server.WithHostPorts(cfg.Server.Address),
 		// 添加其他 Hertz 服务器配置 (例如 From կոնֆիգ)
 	)
-	log.Println("Info: Hertz 服务器实例创建完成.")
+	logger.Info("Hertz 服务器实例创建完成.")
 
 	return h, nil // 返回 Hertz 实例，让 main 函数注册路由并启动
 }
 
 // InitDatabase 初始化 Neo4j 数据库连接
-func InitDatabase(cfg *config.Neo4jConfig) (neo4j.DriverWithContext, error) {
-	// 注意：这里不再需要将 config.Neo4jConfig 转换为 database.Neo4jConfig
-	// 因为 database 包现在可以直接使用 config 包中的类型
-	// 或者调整 database.InitNeo4j 的参数类型
-	// 为了简单起见，我们直接在这里调用驱动创建逻辑，或者假设 database.InitNeo4j 接受 config.Neo4jConfig
-
+func InitDatabase(logger *zap.Logger, cfg *config.Neo4jConfig) (neo4j.DriverWithContext, error) {
+	// 注意：不再需要调用旧的 database.InitNeo4j
 	driver, err := neo4j.NewDriverWithContext(
 		cfg.URI,
 		neo4j.BasicAuth(cfg.Username, cfg.Password, ""),
@@ -85,65 +95,82 @@ func InitDatabase(cfg *config.Neo4jConfig) (neo4j.DriverWithContext, error) {
 	if err != nil {
 		return nil, fmt.Errorf("创建 Neo4j 驱动失败: %w", err)
 	}
-	if err := driver.VerifyConnectivity(context.Background()); err != nil {
-		driver.Close(context.Background())
+
+	// 使用 infrastructure/database 中的 ApplyNeo4jSchemaIfNeeded
+	if err := dbInfra.ApplyNeo4jSchemaIfNeeded(context.Background(), driver, logger); err != nil {
+		// ApplyNeo4jSchemaIfNeeded 内部会记录日志，这里可以选择不再重复记录或记录更高级别的错误
+		logger.Warn("应用 Neo4j Schema 期间发生错误 (详见 infrastructure/database 日志)", zap.Error(err))
+		// 根据策略决定是否因为 schema 失败而返回错误
+		// return nil, fmt.Errorf("应用 Neo4j Schema 失败: %w", err)
+	} else {
+		logger.Info("Neo4j Schema 应用检查完成")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	if err := driver.VerifyConnectivity(ctx); err != nil {
+		driver.Close(ctx)
 		return nil, fmt.Errorf("Neo4j 连接验证失败: %w", err)
 	}
-	// 可以在这里或 database 包中应用 Schema
-	// err = database.ApplyNeo4jSchemaIfNeeded(driver) ...
+	logger.Info("成功验证 Neo4j 连接")
+
 	return driver, nil
 }
 
 // InitRedis 初始化 Redis 连接
-func InitRedis(cfg *config.RedisConfig) (*redis.Client, error) {
+func InitRedis(logger *zap.Logger, cfg *config.RedisConfig) (*redis.Client, error) {
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     cfg.Addr,
 		Password: cfg.Password,
 		DB:       cfg.DB,
 	})
-	if _, err := redisClient.Ping(context.Background()).Result(); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := redisClient.Ping(ctx).Result(); err != nil {
 		return nil, fmt.Errorf("Redis 连接 Ping 失败: %w", err)
 	}
+	logger.Info("成功连接到 Redis", zap.String("address", cfg.Addr))
 	return redisClient, nil
 }
 
 // InitCache 初始化应用缓存
-func InitCache(redisClient *redis.Client, cfg *config.CacheConfig) (cache.NodeAndByteCache, error) {
+func InitCache(logger *zap.Logger, redisClient *redis.Client, cfg *config.CacheConfig) (cache.NodeAndByteCache, error) {
 	redisCache, err := cache.NewRedisCache(redisClient, cfg.Prefix, cfg.EstimatedKeys, cfg.FpRate)
 	if err != nil {
 		return nil, fmt.Errorf("创建 Redis 缓存实例失败: %w", err)
 	}
+	logger.Info("Redis 缓存实例创建成功")
 	return redisCache, nil
 }
 
 // InitDALs 初始化数据访问层
-func InitDALs() (neo4jdal.NodeDAL, neo4jdal.RelationDAL) {
+func InitDALs(logger *zap.Logger) (neo4jdal.NodeDAL, neo4jdal.RelationDAL) {
 	nodeDAL := neo4jdal.NewNodeDAL()
 	relationDAL := neo4jdal.NewRelationDAL()
+	logger.Info("NodeDAL 和 RelationDAL 创建成功")
 	return nodeDAL, relationDAL
 }
 
 // InitRepositories 初始化仓库层
-// 注入配置参数
 func InitRepositories(
+	logger *zap.Logger, // 添加 logger 参数
 	driver neo4j.DriverWithContext,
 	appCache cache.NodeAndByteCache,
 	nodeDAL neo4jdal.NodeDAL,
 	relationDAL neo4jdal.RelationDAL,
-	cacheCfg *config.CacheConfig, // 缓存配置
-	repoCfg *config.RepoConfig, // 仓库配置
+	cacheCfg *config.CacheConfig,
+	repoCfg *config.RepoConfig,
 ) (neo4jrepo.NodeRepository, neo4jrepo.RelationRepository) {
-	// 类型断言：确保 appCache (其底层类型是 *RedisCache) 满足所需的接口
 	relationCache, okRel := appCache.(cache.RelationAndByteCache)
 	if !okRel {
-		log.Fatal("严重: 初始化缓存未正确实现 RelationAndByteCache 接口")
+		logger.Fatal("初始化缓存未正确实现 RelationAndByteCache 接口") // 使用 logger.Fatal
 	}
-	nodeCache, okNode := appCache.(cache.NodeAndByteCache) // 这个断言总是成功的
+	nodeCache, okNode := appCache.(cache.NodeAndByteCache)
 	if !okNode {
-		log.Fatal("严重: 初始化缓存未正确实现 NodeAndByteCache 接口 (逻辑错误)")
+		logger.Fatal("初始化缓存未正确实现 NodeAndByteCache 接口 (逻辑错误)") // 使用 logger.Fatal
 	}
 
-	// 创建 RelationRepository 时传入 TTL 配置
 	relationRepo := neo4jrepo.NewRelationRepository(
 		driver,
 		relationDAL,
@@ -151,8 +178,8 @@ func InitRepositories(
 		cacheCfg.TTL.DefaultRelation,
 		cacheCfg.TTL.GetNodeRelations,
 	)
+	logger.Info("RelationRepository 创建成功")
 
-	// 创建 NodeRepository 时传入 TTL 和查询参数配置
 	nodeRepo := neo4jrepo.NewNodeRepository(
 		driver,
 		nodeDAL,
@@ -167,14 +194,20 @@ func InitRepositories(
 		repoCfg.QueryParams.GetPathMaxDepthLimit,
 		repoCfg.QueryParams.SearchNodesDefaultLimit,
 	)
+	logger.Info("NodeRepository 创建成功")
+
 	return nodeRepo, relationRepo
 }
 
-func InitService(nodeRepo neo4jrepo.NodeRepository, relationRepo neo4jrepo.RelationRepository) service.NetworkService {
+// InitService 初始化服务层
+func InitService(logger *zap.Logger, nodeRepo neo4jrepo.NodeRepository, relationRepo neo4jrepo.RelationRepository) service.NetworkService {
 	networkSvc := service.NewNetworkService(nodeRepo, relationRepo)
+	logger.Info("NetworkService 创建成功")
 	return networkSvc
 }
 
-func InjectDependencies(networkSvc service.NetworkService) {
+// InjectDependencies 注入依赖到 Handler
+func InjectDependencies(logger *zap.Logger, networkSvc service.NetworkService) {
 	network.SetNetworkService(networkSvc)
+	logger.Info("NetworkService 成功注入到 Network Handler")
 }
