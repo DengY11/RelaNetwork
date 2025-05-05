@@ -7,54 +7,48 @@ import (
 	"fmt"
 
 	network "labelwall/biz/model/relationship/network"
+	"labelwall/biz/service" // Import service layer
+
+	// "labelwall/dependency_inject" // Import DI for service initialization - Commented out for now
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 )
+
+// Initialize service using dependency injection - Commented out for now
+// var networkService service.NetworkService = dependency_inject.GetNetworkService()
+var networkService service.NetworkService // Declare variable, assume initialized elsewhere
+
+// SetNetworkService allows setting the service instance from outside the package.
+// This is typically called during application initialization (e.g., in main.go).
+func SetNetworkService(svc service.NetworkService) {
+	if networkService != nil {
+		// Optionally log a warning if the service is being reset
+		fmt.Println("Warning: NetworkService is being re-initialized")
+	}
+	networkService = svc
+}
 
 // GetNetwork .
 // @router /api/v1/network [GET]
 func GetNetwork(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.GetNetworkRequest
+	// Bind Query Params (startNodeCriteria map, depth, relationTypes, nodeTypes)
 	err = c.BindAndValidate(&req)
 	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+		c.JSON(consts.StatusBadRequest, &network.GetNetworkResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
 
-	resp := new(network.GetNetworkResponse)
-
-	resp.Success = true
-
-	respMessage := string(c.Path())
-
-	resp.Nodes = make([]*network.Node, 0)
-
-	for k, v := range c.Params {
-		s := fmt.Sprintf("%s %s", fmt.Sprint(k), v)
-		respMessage += s
+	// Call Service
+	resp, err := networkService.GetNetwork(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.GetNetworkResponse{Success: false, Message: "获取网络图谱失败: " + err.Error()})
+		return
 	}
 
-	resp.Message = respMessage
-
-	resp.Nodes = append(resp.Nodes, &network.Node{
-		ID:         "01",
-		Type:       1,
-		Name:       "hachimi",
-		Avatar:     nil,
-		Profession: nil,
-		Properties: nil,
-	})
-
-	resp.Nodes = append(resp.Nodes, &network.Node{
-		ID:         "02",
-		Type:       1,
-		Name:       "dy",
-		Avatar:     nil,
-		Profession: nil,
-		Properties: nil,
-	})
+	// GetNetwork always returns OK status, even if no results found
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -63,14 +57,27 @@ func GetNetwork(ctx context.Context, c *app.RequestContext) {
 func GetPath(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.GetPathRequest
+	// Bind Query Params (source_id, target_id, max_depth, types)
 	err = c.BindAndValidate(&req)
 	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+		c.JSON(consts.StatusBadRequest, &network.GetPathResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
 
-	resp := new(network.GetPathResponse)
+	// Simple validation for required fields
+	if req.SourceID == "" || req.TargetID == "" {
+		c.JSON(consts.StatusBadRequest, &network.GetPathResponse{Success: false, Message: "源节点 ID 和目标节点 ID 不能为空"})
+		return
+	}
 
+	// Call Service
+	resp, err := networkService.GetPath(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.GetPathResponse{Success: false, Message: "查询路径失败: " + err.Error()})
+		return
+	}
+
+	// Service handles 'Not Found' by setting Success=false
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -79,14 +86,21 @@ func GetPath(ctx context.Context, c *app.RequestContext) {
 func SearchNodes(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.SearchNodesRequest
+	// Bind Query Params (criteria map, type, limit, offset)
 	err = c.BindAndValidate(&req)
 	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+		c.JSON(consts.StatusBadRequest, &network.SearchNodesResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
 
-	resp := new(network.SearchNodesResponse)
+	// Call Service
+	resp, err := networkService.SearchNodes(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.SearchNodesResponse{Success: false, Message: "搜索节点失败: " + err.Error()})
+		return
+	}
 
+	// Search always returns OK status, even if no results found
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -97,12 +111,27 @@ func CreateNode(ctx context.Context, c *app.RequestContext) {
 	var req network.CreateNodeRequest
 	err = c.BindAndValidate(&req)
 	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+		c.JSON(consts.StatusBadRequest, &network.CreateNodeResponse{Success: false, Message: "无效请求: " + err.Error()})
 		return
 	}
 
-	resp := new(network.CreateNodeResponse)
+	// Call Service
+	resp, err := networkService.CreateNode(ctx, &req)
+	if err != nil {
+		// Handle internal server error from service
+		c.JSON(consts.StatusInternalServerError, &network.CreateNodeResponse{Success: false, Message: "创建节点失败: " + err.Error()})
+		return
+	}
 
+	// Handle service-level logical errors (though CreateNode usually returns success or internal error)
+	if !resp.Success {
+		// Assuming CreateNode failures indicated by Success=false are likely due to bad input or conflicts
+		// Return Bad Request status based on README expectations for creation failures
+		c.JSON(consts.StatusBadRequest, resp) // Or StatusConflict if appropriate
+		return
+	}
+
+	// Success - README specifies 200 OK for successful creation
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -111,14 +140,32 @@ func CreateNode(ctx context.Context, c *app.RequestContext) {
 func GetNode(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.GetNodeRequest
-	err = c.BindAndValidate(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+	// Bind Path Param "id"
+	req.ID = c.Param("id") // Assuming ID is passed as a path parameter :id
+	// Validate if ID is present (simple validation)
+	if req.ID == "" {
+		c.JSON(consts.StatusBadRequest, &network.GetNodeResponse{Success: false, Message: "节点 ID 不能为空"})
 		return
 	}
 
-	resp := new(network.GetNodeResponse)
+	// Call Service
+	resp, err := networkService.GetNode(ctx, &req)
+	if err != nil {
+		// Handle internal server error from service
+		c.JSON(consts.StatusInternalServerError, &network.GetNodeResponse{Success: false, Message: "获取节点失败: " + err.Error()})
+		return
+	}
 
+	// Handle service-level logical errors (e.g., Not Found)
+	if !resp.Success {
+		// Check if it's a "Not Found" scenario based on service message or a dedicated field if added
+		// Assuming service message indicates not found clearly as per service implementation.
+		// README specifies 200 OK for GetNode, so we return OK even if not found.
+		c.JSON(consts.StatusOK, resp)
+		return
+	}
+
+	// Success
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -127,14 +174,35 @@ func GetNode(ctx context.Context, c *app.RequestContext) {
 func UpdateNode(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.UpdateNodeRequest
-	err = c.BindAndValidate(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+
+	// Bind Path Param "id"
+	req.ID = c.Param("id")
+	if req.ID == "" {
+		c.JSON(consts.StatusBadRequest, &network.UpdateNodeResponse{Success: false, Message: "节点 ID 不能为空"})
 		return
 	}
 
-	resp := new(network.UpdateNodeResponse)
+	// Bind JSON Body for other fields
+	if err = c.BindAndValidate(&req); err != nil {
+		c.JSON(consts.StatusBadRequest, &network.UpdateNodeResponse{Success: false, Message: "无效请求体: " + err.Error()})
+		return
+	}
 
+	// Call Service
+	resp, err := networkService.UpdateNode(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.UpdateNodeResponse{Success: false, Message: "更新节点失败: " + err.Error()})
+		return
+	}
+
+	// Handle Not Found (Success=false from service)
+	if !resp.Success {
+		// README implies 200 OK for Update even if not found, with Success=false in body.
+		c.JSON(consts.StatusOK, resp)
+		return
+	}
+
+	// Success
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -143,14 +211,21 @@ func UpdateNode(ctx context.Context, c *app.RequestContext) {
 func DeleteNode(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.DeleteNodeRequest
-	err = c.BindAndValidate(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+	// Bind Path Param "id"
+	req.ID = c.Param("id")
+	if req.ID == "" {
+		c.JSON(consts.StatusBadRequest, &network.DeleteNodeResponse{Success: false, Message: "节点 ID 不能为空"})
 		return
 	}
 
-	resp := new(network.DeleteNodeResponse)
+	// Call Service
+	resp, err := networkService.DeleteNode(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.DeleteNodeResponse{Success: false, Message: "删除节点失败: " + err.Error()})
+		return
+	}
 
+	// Service handles 'Not Found' by returning Success=true. README specifies 200 OK.
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -161,12 +236,24 @@ func CreateRelation(ctx context.Context, c *app.RequestContext) {
 	var req network.CreateRelationRequest
 	err = c.BindAndValidate(&req)
 	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+		c.JSON(consts.StatusBadRequest, &network.CreateRelationResponse{Success: false, Message: "无效请求: " + err.Error()})
 		return
 	}
 
-	resp := new(network.CreateRelationResponse)
+	// Call Service
+	resp, err := networkService.CreateRelation(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.CreateRelationResponse{Success: false, Message: "创建关系失败: " + err.Error()})
+		return
+	}
 
+	// Handle service-level logical errors (e.g., node not found, indicated by Success=false)
+	if !resp.Success {
+		c.JSON(consts.StatusBadRequest, resp) // Assume failures are client errors
+		return
+	}
+
+	// Success - README specifies 200 OK
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -175,14 +262,21 @@ func CreateRelation(ctx context.Context, c *app.RequestContext) {
 func GetRelation(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.GetRelationRequest
-	err = c.BindAndValidate(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+	// Bind Path Param "id"
+	req.ID = c.Param("id")
+	if req.ID == "" {
+		c.JSON(consts.StatusBadRequest, &network.GetRelationResponse{Success: false, Message: "关系 ID 不能为空"})
 		return
 	}
 
-	resp := new(network.GetRelationResponse)
+	// Call Service
+	resp, err := networkService.GetRelation(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.GetRelationResponse{Success: false, Message: "获取关系失败: " + err.Error()})
+		return
+	}
 
+	// Handle Not Found (Success=false from service). README specifies 200 OK.
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -191,14 +285,28 @@ func GetRelation(ctx context.Context, c *app.RequestContext) {
 func UpdateRelation(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.UpdateRelationRequest
-	err = c.BindAndValidate(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+
+	// Bind Path Param "id"
+	req.ID = c.Param("id")
+	if req.ID == "" {
+		c.JSON(consts.StatusBadRequest, &network.UpdateRelationResponse{Success: false, Message: "关系 ID 不能为空"})
 		return
 	}
 
-	resp := new(network.UpdateRelationResponse)
+	// Bind JSON Body
+	if err = c.BindAndValidate(&req); err != nil {
+		c.JSON(consts.StatusBadRequest, &network.UpdateRelationResponse{Success: false, Message: "无效请求体: " + err.Error()})
+		return
+	}
 
+	// Call Service
+	resp, err := networkService.UpdateRelation(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.UpdateRelationResponse{Success: false, Message: "更新关系失败: " + err.Error()})
+		return
+	}
+
+	// Handle Not Found (Success=false from service). README specifies 200 OK.
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -207,14 +315,21 @@ func UpdateRelation(ctx context.Context, c *app.RequestContext) {
 func DeleteRelation(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.DeleteRelationRequest
-	err = c.BindAndValidate(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+	// Bind Path Param "id"
+	req.ID = c.Param("id")
+	if req.ID == "" {
+		c.JSON(consts.StatusBadRequest, &network.DeleteRelationResponse{Success: false, Message: "关系 ID 不能为空"})
 		return
 	}
 
-	resp := new(network.DeleteRelationResponse)
+	// Call Service
+	resp, err := networkService.DeleteRelation(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.DeleteRelationResponse{Success: false, Message: "删除关系失败: " + err.Error()})
+		return
+	}
 
+	// Service handles Not Found by returning Success=true. README specifies 200 OK.
 	c.JSON(consts.StatusOK, resp)
 }
 
@@ -223,13 +338,27 @@ func DeleteRelation(ctx context.Context, c *app.RequestContext) {
 func GetNodeRelations(ctx context.Context, c *app.RequestContext) {
 	var err error
 	var req network.GetNodeRelationsRequest
-	err = c.BindAndValidate(&req)
-	if err != nil {
-		c.String(consts.StatusBadRequest, err.Error())
+
+	// Bind Path Param "node_id"
+	req.NodeID = c.Param("node_id")
+	if req.NodeID == "" {
+		c.JSON(consts.StatusBadRequest, &network.GetNodeRelationsResponse{Success: false, Message: "节点 ID 不能为空"})
 		return
 	}
 
-	resp := new(network.GetNodeRelationsResponse)
+	// Bind Query Params (types, outgoing, incoming, limit, offset)
+	if err = c.BindAndValidate(&req); err != nil {
+		c.JSON(consts.StatusBadRequest, &network.GetNodeRelationsResponse{Success: false, Message: "无效请求参数: " + err.Error()})
+		return
+	}
 
+	// Call Service
+	resp, err := networkService.GetNodeRelations(ctx, &req)
+	if err != nil {
+		c.JSON(consts.StatusInternalServerError, &network.GetNodeRelationsResponse{Success: false, Message: "获取节点关系失败: " + err.Error()})
+		return
+	}
+
+	// Always return OK status, even if no relations found
 	c.JSON(consts.StatusOK, resp)
 }

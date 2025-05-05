@@ -1,0 +1,88 @@
+package config
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/fsnotify/fsnotify"
+	"github.com/spf13/viper"
+)
+
+// AppConfig 包含所有应用程序的配置
+type AppConfig struct {
+	Server   ServerConfig   `mapstructure:"server"`
+	Database DatabaseConfig `mapstructure:"database"`
+	Cache    CacheConfig    `mapstructure:"cache"`
+	Logging  LoggingConfig  `mapstructure:"logging"`
+}
+
+// ServerConfig 服务器相关配置
+type ServerConfig struct {
+	Address string `mapstructure:"address"`
+}
+
+// DatabaseConfig 包含所有数据库的配置
+type DatabaseConfig struct {
+	Neo4j Neo4jConfig `mapstructure:"neo4j"`
+	Redis RedisConfig `mapstructure:"redis"`
+}
+
+// Neo4jConfig Neo4j 连接配置
+type Neo4jConfig struct {
+	URI      string `mapstructure:"uri"`
+	Username string `mapstructure:"username"`
+	Password string `mapstructure:"password"`
+}
+
+// RedisConfig Redis 连接配置
+type RedisConfig struct {
+	Addr     string `mapstructure:"addr"`
+	Password string `mapstructure:"password"`
+	DB       int    `mapstructure:"db"`
+}
+
+// CacheConfig 缓存相关配置
+type CacheConfig struct {
+	Prefix        string  `mapstructure:"prefix"`
+	EstimatedKeys uint    `mapstructure:"estimated_keys"` // 注意：类型是 uint
+	FpRate        float64 `mapstructure:"fp_rate"`
+}
+
+// LoggingConfig 日志相关配置
+type LoggingConfig struct {
+	Level string `mapstructure:"level"`
+}
+
+// GlobalConfig 是全局配置实例
+var GlobalConfig = new(AppConfig)
+
+func InitConfig(path string) (*AppConfig, error) {
+	v := viper.New()
+	v.SetConfigFile(path)   // 设置配置文件路径
+	v.SetConfigType("yaml") // 设置配置文件类型
+
+	// 尝试读取配置文件
+	if err := v.ReadInConfig(); err != nil {
+		return nil, fmt.Errorf("读取配置文件失败: %w", err)
+	}
+
+	// 将配置解析到 GlobalConfig 结构体中
+	if err := v.Unmarshal(GlobalConfig); err != nil {
+		return nil, fmt.Errorf("解析配置文件失败: %w", err)
+	}
+
+	// 监听配置文件变化 (可选)
+	v.WatchConfig()
+	v.OnConfigChange(func(e fsnotify.Event) {
+		log.Printf("配置文件已更改: %s", e.Name)
+		// 重新解析配置到 GlobalConfig
+		if err := v.Unmarshal(GlobalConfig); err != nil {
+			log.Printf("警告: 重新解析配置文件失败: %v", err)
+		} else {
+			log.Println("Info: 配置已重新加载.")
+		}
+	})
+
+	log.Printf("Info: 成功加载并解析配置文件: %s", path)
+	return GlobalConfig, nil
+}

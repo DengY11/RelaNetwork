@@ -1,0 +1,24 @@
+# 服务器配置
+server:
+  address: ":8888" # Hertz 监听地址和端口
+
+# 数据库配置
+database:
+  neo4j:
+    uri: "neo4j://localhost:7687" # Neo4j Bolt URI
+    username: "neo4j"             # Neo4j 用户名
+    password: "password"          # Neo4j 密码
+  redis:
+    addr: "localhost:6381"        # Redis 地址
+    password: ""                  # Redis 密码 (如果需要)
+    db: 0                         # Redis 数据库编号
+
+# 缓存配置
+cache:
+  prefix: "labelwall:"            # Redis 缓存键前缀
+  estimated_keys: 100000          # 预估键数量 (用于布隆过滤器等)
+  fp_rate: 0.01                   # 允许的误判率 (用于布隆过滤器等)
+
+# 日志配置 (示例，可以根据需要扩展)
+logging:
+  level: "info"                   # 日志级别 (debug, info, warn, error) 

@@ -3,12 +3,19 @@
 package main
 
 import (
-	"github.com/cloudwego/hertz/pkg/app/server"
+	"labelwall/internal/bootstrap" // 这是初始化包
+	"log"
 )
 
 func main() {
-	h := server.Default()
+	configPath := "./config.yaml"
 
-	register(h)
-	h.Spin()
+	h, err := bootstrap.Init(configPath)
+	if err != nil {
+		log.Fatalf("严重: 应用程序初始化失败: %v", err)
+	}
+
+	register(h) // 注册路由
+	log.Println("Info: 正在启动 Hertz 服务器...")
+	h.Spin() // 启动服务器并监听
 }
