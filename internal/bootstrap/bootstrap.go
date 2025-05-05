@@ -205,7 +205,8 @@ func InitService(logger *zap.Logger, nodeRepo neo4jrepo.NodeRepository, relation
 }
 
 // InjectDependencies 注入依赖到 Handler
+// 同时注入 logger
 func InjectDependencies(logger *zap.Logger, networkSvc service.NetworkService) {
-	network.SetNetworkService(networkSvc)
-	logger.Info("NetworkService 成功注入到 Network Handler")
+	network.SetNetworkService(networkSvc, logger) // 将 logger 传递给 SetNetworkService
+	logger.Info("NetworkService 和 Logger 成功注入到 Network Handler")
 }

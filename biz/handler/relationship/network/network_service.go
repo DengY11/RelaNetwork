@@ -9,7 +9,7 @@ import (
 	network "labelwall/biz/model/relationship/network"
 	"labelwall/biz/service" // Import service layer
 
-	// "labelwall/dependency_inject" // Import DI for service initialization - Commented out for now
+	"go.uber.org/zap" // 添加 zap 导入
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -17,114 +17,161 @@ import (
 
 // Initialize service using dependency injection - Commented out for now
 // var networkService service.NetworkService = dependency_inject.GetNetworkService()
-var networkService service.NetworkService // Declare variable, assume initialized elsewhere
+var (
+	networkService service.NetworkService // Declare variable, assume initialized elsewhere
+	logger         *zap.Logger            // Package-level logger
+)
 
-// SetNetworkService allows setting the service instance from outside the package.
-// This is typically called during application initialization (e.g., in main.go).
-func SetNetworkService(svc service.NetworkService) {
-	if networkService != nil {
-		// Optionally log a warning if the service is being reset
-		fmt.Println("Warning: NetworkService is being re-initialized")
+// SetNetworkService allows setting the service instance and logger from outside.
+// This is typically called during application initialization (e.g., in bootstrap.go).
+func SetNetworkService(svc service.NetworkService, log *zap.Logger) { // Modify to accept logger
+	if networkService != nil || logger != nil {
+		// Use the incoming logger if available, otherwise use the existing one for the warning
+		logToUse := log
+		if logToUse == nil {
+			logToUse = logger // Use existing package logger if new one is nil
+		}
+		if logToUse != nil { // Check if any logger is available
+			logToUse.Warn("NetworkService or Logger is being re-initialized")
+		} else {
+			fmt.Println("Warning: NetworkService or Logger is being re-initialized (logger not available for warning)")
+		}
 	}
 	networkService = svc
+	logger = log // Set the package-level logger
+}
+
+// ensureLogger checks if the package logger is initialized and returns a default Nop logger if not.
+func ensureLogger() *zap.Logger {
+	if logger == nil {
+		// Fallback to Nop logger if not initialized to prevent nil pointer dereference
+		fmt.Println("Error: Package logger not initialized. Using Nop logger.") // Log error to console
+		return zap.NewNop()
+	}
+	return logger
 }
 
 // GetNetwork .
 // @router /api/v1/network [GET]
 func GetNetwork(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger() // Get logger instance
+	log.Info("Handler GetNetwork called")
 	var err error
 	var req network.GetNetworkRequest
 	// Bind Query Params (startNodeCriteria map, depth, relationTypes, nodeTypes)
 	err = c.BindAndValidate(&req)
 	if err != nil {
+		log.Error("GetNetwork: BindAndValidate failed", zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.GetNetworkResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
+	log.Debug("GetNetwork request parameters bound", zap.Any("request", req)) // Log request details
 
 	// Call Service
 	resp, err := networkService.GetNetwork(ctx, &req)
 	if err != nil {
+		log.Error("GetNetwork: Service call failed", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.GetNetworkResponse{Success: false, Message: "获取网络图谱失败: " + err.Error()})
 		return
 	}
 
 	// GetNetwork always returns OK status, even if no results found
+	log.Info("GetNetwork handler finished successfully", zap.Bool("responseSuccess", resp.Success), zap.Int("nodeCount", len(resp.Nodes)), zap.Int("relationCount", len(resp.Relations)))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // GetPath .
 // @router /api/v1/path [GET]
 func GetPath(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler GetPath called")
 	var err error
 	var req network.GetPathRequest
 	// Bind Query Params (source_id, target_id, max_depth, types)
 	err = c.BindAndValidate(&req)
 	if err != nil {
+		log.Error("GetPath: BindAndValidate failed", zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.GetPathResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
 
 	// Simple validation for required fields
 	if req.SourceID == "" || req.TargetID == "" {
+		log.Warn("GetPath: Missing required fields", zap.String("sourceID", req.SourceID), zap.String("targetID", req.TargetID))
 		c.JSON(consts.StatusBadRequest, &network.GetPathResponse{Success: false, Message: "源节点 ID 和目标节点 ID 不能为空"})
 		return
 	}
+	log.Debug("GetPath request parameters bound", zap.Any("request", req))
 
 	// Call Service
 	resp, err := networkService.GetPath(ctx, &req)
 	if err != nil {
+		log.Error("GetPath: Service call failed", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.GetPathResponse{Success: false, Message: "查询路径失败: " + err.Error()})
 		return
 	}
 
 	// Service handles 'Not Found' by setting Success=false
+	log.Info("GetPath handler finished", zap.Bool("responseSuccess", resp.Success))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // SearchNodes .
 // @router /api/v1/nodes/search [GET]
 func SearchNodes(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler SearchNodes called")
 	var err error
 	var req network.SearchNodesRequest
 	// Bind Query Params (criteria map, type, limit, offset)
 	err = c.BindAndValidate(&req)
 	if err != nil {
+		log.Error("SearchNodes: BindAndValidate failed", zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.SearchNodesResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
+	log.Debug("SearchNodes request parameters bound", zap.Any("request", req))
 
 	// Call Service
 	resp, err := networkService.SearchNodes(ctx, &req)
 	if err != nil {
+		log.Error("SearchNodes: Service call failed", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.SearchNodesResponse{Success: false, Message: "搜索节点失败: " + err.Error()})
 		return
 	}
 
 	// Search always returns OK status, even if no results found
+	log.Info("SearchNodes handler finished successfully", zap.Bool("responseSuccess", resp.Success), zap.Int32("totalFound", resp.Total), zap.Int("resultsReturned", len(resp.Nodes)))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // CreateNode .
 // @router /api/v1/nodes [POST]
 func CreateNode(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler CreateNode called")
 	var err error
 	var req network.CreateNodeRequest
 	err = c.BindAndValidate(&req)
 	if err != nil {
+		log.Error("CreateNode: BindAndValidate failed", zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.CreateNodeResponse{Success: false, Message: "无效请求: " + err.Error()})
 		return
 	}
+	log.Debug("CreateNode request parameters bound", zap.Any("request", req))
 
 	// Call Service
 	resp, err := networkService.CreateNode(ctx, &req)
 	if err != nil {
 		// Handle internal server error from service
+		log.Error("CreateNode: Service call failed", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.CreateNodeResponse{Success: false, Message: "创建节点失败: " + err.Error()})
 		return
 	}
 
 	// Handle service-level logical errors (though CreateNode usually returns success or internal error)
 	if !resp.Success {
+		log.Warn("CreateNode: Service returned logical failure", zap.String("message", resp.Message))
 		// Assuming CreateNode failures indicated by Success=false are likely due to bad input or conflicts
 		// Return Bad Request status based on README expectations for creation failures
 		c.JSON(consts.StatusBadRequest, resp) // Or StatusConflict if appropriate
@@ -132,32 +179,39 @@ func CreateNode(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Success - README specifies 200 OK for successful creation
+	log.Info("CreateNode handler finished successfully", zap.String("newNodeID", resp.Node.ID))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // GetNode .
 // @router /api/v1/nodes/:id [GET]
 func GetNode(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler GetNode called")
 	var err error
 	var req network.GetNodeRequest
 	// Bind Path Param "id"
 	req.ID = c.Param("id") // Assuming ID is passed as a path parameter :id
 	// Validate if ID is present (simple validation)
 	if req.ID == "" {
+		log.Warn("GetNode: Missing node ID")
 		c.JSON(consts.StatusBadRequest, &network.GetNodeResponse{Success: false, Message: "节点 ID 不能为空"})
 		return
 	}
+	log.Debug("GetNode request parameters bound", zap.String("nodeID", req.ID))
 
 	// Call Service
 	resp, err := networkService.GetNode(ctx, &req)
 	if err != nil {
 		// Handle internal server error from service
+		log.Error("GetNode: Service call failed", zap.String("nodeID", req.ID), zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.GetNodeResponse{Success: false, Message: "获取节点失败: " + err.Error()})
 		return
 	}
 
 	// Handle service-level logical errors (e.g., Not Found)
 	if !resp.Success {
+		log.Info("GetNode: Node not found or service indicated failure", zap.String("nodeID", req.ID), zap.String("message", resp.Message))
 		// Check if it's a "Not Found" scenario based on service message or a dedicated field if added
 		// Assuming service message indicates not found clearly as per service implementation.
 		// README specifies 200 OK for GetNode, so we return OK even if not found.
@@ -166,199 +220,247 @@ func GetNode(ctx context.Context, c *app.RequestContext) {
 	}
 
 	// Success
+	log.Info("GetNode handler finished successfully", zap.String("nodeID", req.ID))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // UpdateNode .
 // @router /api/v1/nodes/:id [PUT]
 func UpdateNode(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler UpdateNode called")
 	var err error
 	var req network.UpdateNodeRequest
 
 	// Bind Path Param "id"
 	req.ID = c.Param("id")
 	if req.ID == "" {
+		log.Warn("UpdateNode: Missing node ID")
 		c.JSON(consts.StatusBadRequest, &network.UpdateNodeResponse{Success: false, Message: "节点 ID 不能为空"})
 		return
 	}
 
 	// Bind JSON Body for other fields
 	if err = c.BindAndValidate(&req); err != nil {
+		log.Error("UpdateNode: BindAndValidate failed", zap.String("nodeID", req.ID), zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.UpdateNodeResponse{Success: false, Message: "无效请求体: " + err.Error()})
 		return
 	}
+	log.Debug("UpdateNode request parameters bound", zap.Any("request", req))
 
 	// Call Service
 	resp, err := networkService.UpdateNode(ctx, &req)
 	if err != nil {
+		log.Error("UpdateNode: Service call failed", zap.String("nodeID", req.ID), zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.UpdateNodeResponse{Success: false, Message: "更新节点失败: " + err.Error()})
 		return
 	}
 
 	// Handle Not Found (Success=false from service)
 	if !resp.Success {
+		log.Info("UpdateNode: Node not found or service indicated failure", zap.String("nodeID", req.ID), zap.String("message", resp.Message))
 		// README implies 200 OK for Update even if not found, with Success=false in body.
 		c.JSON(consts.StatusOK, resp)
 		return
 	}
 
 	// Success
+	log.Info("UpdateNode handler finished successfully", zap.String("nodeID", req.ID))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // DeleteNode .
 // @router /api/v1/nodes/:id [DELETE]
 func DeleteNode(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler DeleteNode called")
 	var err error
 	var req network.DeleteNodeRequest
 	// Bind Path Param "id"
 	req.ID = c.Param("id")
 	if req.ID == "" {
+		log.Warn("DeleteNode: Missing node ID")
 		c.JSON(consts.StatusBadRequest, &network.DeleteNodeResponse{Success: false, Message: "节点 ID 不能为空"})
 		return
 	}
+	log.Debug("DeleteNode request parameters bound", zap.String("nodeID", req.ID))
 
 	// Call Service
 	resp, err := networkService.DeleteNode(ctx, &req)
 	if err != nil {
+		log.Error("DeleteNode: Service call failed", zap.String("nodeID", req.ID), zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.DeleteNodeResponse{Success: false, Message: "删除节点失败: " + err.Error()})
 		return
 	}
 
 	// Service handles 'Not Found' by returning Success=true. README specifies 200 OK.
+	log.Info("DeleteNode handler finished successfully", zap.String("nodeID", req.ID), zap.Bool("responseSuccess", resp.Success))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // CreateRelation .
 // @router /api/v1/relations [POST]
 func CreateRelation(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler CreateRelation called")
 	var err error
 	var req network.CreateRelationRequest
 	err = c.BindAndValidate(&req)
 	if err != nil {
+		log.Error("CreateRelation: BindAndValidate failed", zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.CreateRelationResponse{Success: false, Message: "无效请求: " + err.Error()})
 		return
 	}
+	log.Debug("CreateRelation request parameters bound", zap.Any("request", req))
 
 	// Call Service
 	resp, err := networkService.CreateRelation(ctx, &req)
 	if err != nil {
+		log.Error("CreateRelation: Service call failed", zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.CreateRelationResponse{Success: false, Message: "创建关系失败: " + err.Error()})
 		return
 	}
 
 	// Handle service-level logical errors (e.g., node not found, indicated by Success=false)
 	if !resp.Success {
+		log.Warn("CreateRelation: Service returned logical failure", zap.String("message", resp.Message))
 		c.JSON(consts.StatusBadRequest, resp) // Assume failures are client errors
 		return
 	}
 
 	// Success - README specifies 200 OK
+	log.Info("CreateRelation handler finished successfully", zap.String("newRelationID", resp.Relation.ID))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // GetRelation .
 // @router /api/v1/relations/:id [GET]
 func GetRelation(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler GetRelation called")
 	var err error
 	var req network.GetRelationRequest
 	// Bind Path Param "id"
 	req.ID = c.Param("id")
 	if req.ID == "" {
+		log.Warn("GetRelation: Missing relation ID")
 		c.JSON(consts.StatusBadRequest, &network.GetRelationResponse{Success: false, Message: "关系 ID 不能为空"})
 		return
 	}
+	log.Debug("GetRelation request parameters bound", zap.String("relationID", req.ID))
 
 	// Call Service
 	resp, err := networkService.GetRelation(ctx, &req)
 	if err != nil {
+		log.Error("GetRelation: Service call failed", zap.String("relationID", req.ID), zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.GetRelationResponse{Success: false, Message: "获取关系失败: " + err.Error()})
 		return
 	}
 
 	// Handle Not Found (Success=false from service). README specifies 200 OK.
+	log.Info("GetRelation handler finished", zap.String("relationID", req.ID), zap.Bool("responseSuccess", resp.Success))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // UpdateRelation .
 // @router /api/v1/relations/:id [PUT]
 func UpdateRelation(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler UpdateRelation called")
 	var err error
 	var req network.UpdateRelationRequest
 
 	// Bind Path Param "id"
 	req.ID = c.Param("id")
 	if req.ID == "" {
+		log.Warn("UpdateRelation: Missing relation ID")
 		c.JSON(consts.StatusBadRequest, &network.UpdateRelationResponse{Success: false, Message: "关系 ID 不能为空"})
 		return
 	}
 
 	// Bind JSON Body
 	if err = c.BindAndValidate(&req); err != nil {
+		log.Error("UpdateRelation: BindAndValidate failed", zap.String("relationID", req.ID), zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.UpdateRelationResponse{Success: false, Message: "无效请求体: " + err.Error()})
 		return
 	}
+	log.Debug("UpdateRelation request parameters bound", zap.Any("request", req))
 
 	// Call Service
 	resp, err := networkService.UpdateRelation(ctx, &req)
 	if err != nil {
+		log.Error("UpdateRelation: Service call failed", zap.String("relationID", req.ID), zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.UpdateRelationResponse{Success: false, Message: "更新关系失败: " + err.Error()})
 		return
 	}
 
 	// Handle Not Found (Success=false from service). README specifies 200 OK.
+	log.Info("UpdateRelation handler finished", zap.String("relationID", req.ID), zap.Bool("responseSuccess", resp.Success))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // DeleteRelation .
 // @router /api/v1/relations/:id [DELETE]
 func DeleteRelation(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler DeleteRelation called")
 	var err error
 	var req network.DeleteRelationRequest
 	// Bind Path Param "id"
 	req.ID = c.Param("id")
 	if req.ID == "" {
+		log.Warn("DeleteRelation: Missing relation ID")
 		c.JSON(consts.StatusBadRequest, &network.DeleteRelationResponse{Success: false, Message: "关系 ID 不能为空"})
 		return
 	}
+	log.Debug("DeleteRelation request parameters bound", zap.String("relationID", req.ID))
 
 	// Call Service
 	resp, err := networkService.DeleteRelation(ctx, &req)
 	if err != nil {
+		log.Error("DeleteRelation: Service call failed", zap.String("relationID", req.ID), zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.DeleteRelationResponse{Success: false, Message: "删除关系失败: " + err.Error()})
 		return
 	}
 
 	// Service handles Not Found by returning Success=true. README specifies 200 OK.
+	log.Info("DeleteRelation handler finished successfully", zap.String("relationID", req.ID), zap.Bool("responseSuccess", resp.Success))
 	c.JSON(consts.StatusOK, resp)
 }
 
 // GetNodeRelations .
 // @router /api/v1/nodes/:node_id/relations [GET]
 func GetNodeRelations(ctx context.Context, c *app.RequestContext) {
+	log := ensureLogger()
+	log.Info("Handler GetNodeRelations called")
 	var err error
 	var req network.GetNodeRelationsRequest
 
 	// Bind Path Param "node_id"
 	req.NodeID = c.Param("node_id")
 	if req.NodeID == "" {
+		log.Warn("GetNodeRelations: Missing node ID")
 		c.JSON(consts.StatusBadRequest, &network.GetNodeRelationsResponse{Success: false, Message: "节点 ID 不能为空"})
 		return
 	}
 
 	// Bind Query Params (types, outgoing, incoming, limit, offset)
 	if err = c.BindAndValidate(&req); err != nil {
+		log.Error("GetNodeRelations: BindAndValidate failed", zap.String("nodeID", req.NodeID), zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.GetNodeRelationsResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
+	log.Debug("GetNodeRelations request parameters bound", zap.String("nodeID", req.NodeID), zap.Any("queryParams", req)) // Log node ID and other params
 
 	// Call Service
 	resp, err := networkService.GetNodeRelations(ctx, &req)
 	if err != nil {
+		log.Error("GetNodeRelations: Service call failed", zap.String("nodeID", req.NodeID), zap.Error(err))
 		c.JSON(consts.StatusInternalServerError, &network.GetNodeRelationsResponse{Success: false, Message: "获取节点关系失败: " + err.Error()})
 		return
 	}
 
 	// Always return OK status, even if no relations found
+	log.Info("GetNodeRelations handler finished successfully", zap.String("nodeID", req.NodeID), zap.Bool("responseSuccess", resp.Success), zap.Int32("totalFound", resp.Total), zap.Int("resultsReturned", len(resp.Relations)))
 	c.JSON(consts.StatusOK, resp)
 }
