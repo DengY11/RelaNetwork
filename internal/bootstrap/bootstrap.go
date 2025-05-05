@@ -98,10 +98,8 @@ func InitDatabase(logger *zap.Logger, cfg *config.Neo4jConfig) (neo4j.DriverWith
 
 	// 使用 infrastructure/database 中的 ApplyNeo4jSchemaIfNeeded
 	if err := dbInfra.ApplyNeo4jSchemaIfNeeded(context.Background(), driver, logger); err != nil {
-		// ApplyNeo4jSchemaIfNeeded 内部会记录日志，这里可以选择不再重复记录或记录更高级别的错误
 		logger.Warn("应用 Neo4j Schema 期间发生错误 (详见 infrastructure/database 日志)", zap.Error(err))
-		// 根据策略决定是否因为 schema 失败而返回错误
-		// return nil, fmt.Errorf("应用 Neo4j Schema 失败: %w", err)
+
 	} else {
 		logger.Info("Neo4j Schema 应用检查完成")
 	}
