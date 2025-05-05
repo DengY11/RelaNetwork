@@ -236,6 +236,7 @@ func (s *networkService) DeleteRelation(ctx context.Context, req *network.Delete
 
 // SearchNodes 处理搜索节点的业务逻辑
 func (s *networkService) SearchNodes(ctx context.Context, req *network.SearchNodesRequest) (*network.SearchNodesResponse, error) {
+	fmt.Println(">>> Service: SearchNodes function entered <<<") // <-- 添加的调试信息
 	nodes, total, err := s.nodeRepo.SearchNodes(ctx, req)
 	if err != nil {
 		// 搜索失败通常不认为是致命错误，除非是底层连接问题

@@ -323,7 +323,16 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 	for key, value := range criteria {
 		// --- Revert: Use Parameterized query --- VVV
 		paramName := fmt.Sprintf("prop_%d", propIdx)
-		whereClauses = append(whereClauses, fmt.Sprintf("n.%s = $%s", key, paramName))
+		// --- 修改: 对 name 属性使用 CONTAINS --- VVV
+		var clause string
+		if key == "name" {
+			clause = fmt.Sprintf("n.%s CONTAINS $%s", key, paramName)
+		} else {
+			// 对于其他属性，暂时还使用精确匹配 (可以根据需要扩展)
+			clause = fmt.Sprintf("n.%s = $%s", key, paramName)
+		}
+		whereClauses = append(whereClauses, clause)
+		// --- End 修改 --- ^^^
 		// Add criteria params to BOTH maps
 		mainParams[paramName] = value
 		countParams[paramName] = value
@@ -355,6 +364,11 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 	queryBuilder.WriteString(" ORDER BY n.name") // Keep ordering
 	queryBuilder.WriteString(" SKIP $offset LIMIT $limit")
 	finalQuery := queryBuilder.String()
+
+	// --- 添加日志：打印最终查询和参数 ---
+	fmt.Printf(">>> DAL: Count Query:\n%s\nParams: %v\n", countQuery, countParams)
+	fmt.Printf(">>> DAL: Main Query:\n%s\nParams: %v\n", finalQuery, mainParams)
+	// --- 结束日志 ---
 
 	var nodes []neo4j.Node
 	var labelsList [][]string

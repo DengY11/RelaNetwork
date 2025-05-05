@@ -58,14 +58,29 @@ func GetNetwork(ctx context.Context, c *app.RequestContext) {
 	log.Info("Handler GetNetwork called")
 	var err error
 	var req network.GetNetworkRequest
-	// Bind Query Params (startNodeCriteria map, depth, relationTypes, nodeTypes)
+	// Bind Query Params (depth, relationTypes, nodeTypes) - StartNodeCriteria needs manual binding
 	err = c.BindAndValidate(&req)
 	if err != nil {
-		log.Error("GetNetwork: BindAndValidate failed", zap.Error(err))
+		log.Error("GetNetwork: BindAndValidate failed for standard params", zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.GetNetworkResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
-	log.Debug("GetNetwork request parameters bound", zap.Any("request", req)) // Log request details
+
+	// --- Manual Binding for StartNodeCriteria ---
+	log.Debug("Starting manual binding for StartNodeCriteria")
+	req.StartNodeCriteria = make(map[string]string) // Initialize the map
+	c.QueryArgs().VisitAll(func(key, value []byte) {
+		keyStr := string(key)
+		if len(keyStr) > len("startNodeCriteria[]") && keyStr[:len("startNodeCriteria[")] == "startNodeCriteria[" && keyStr[len(keyStr)-1] == ']' {
+			mapKey := keyStr[len("startNodeCriteria[") : len(keyStr)-1]
+			req.StartNodeCriteria[mapKey] = string(value)
+			log.Debug("Manually bound StartNodeCriteria entry", zap.String("key", mapKey), zap.String("value", string(value)))
+		}
+	})
+	log.Debug("Finished manual binding for StartNodeCriteria", zap.Any("boundMap", req.StartNodeCriteria))
+	// --- End Manual Binding ---
+
+	log.Debug("GetNetwork request parameters bound (final)", zap.Any("request", req))
 
 	// Call Service
 	resp, err := networkService.GetNetwork(ctx, &req)
@@ -123,14 +138,29 @@ func SearchNodes(ctx context.Context, c *app.RequestContext) {
 	log.Info("Handler SearchNodes called")
 	var err error
 	var req network.SearchNodesRequest
-	// Bind Query Params (criteria map, type, limit, offset)
+	// Bind Query Params (type, limit, offset) - Criteria needs manual binding
 	err = c.BindAndValidate(&req)
 	if err != nil {
-		log.Error("SearchNodes: BindAndValidate failed", zap.Error(err))
+		log.Error("SearchNodes: BindAndValidate failed for standard params", zap.Error(err))
 		c.JSON(consts.StatusBadRequest, &network.SearchNodesResponse{Success: false, Message: "无效请求参数: " + err.Error()})
 		return
 	}
-	log.Debug("SearchNodes request parameters bound", zap.Any("request", req))
+
+	// --- Manual Binding for Criteria ---
+	log.Debug("Starting manual binding for Criteria")
+	req.Criteria = make(map[string]string) // Initialize the map
+	c.QueryArgs().VisitAll(func(key, value []byte) {
+		keyStr := string(key)
+		if len(keyStr) > len("criteria[]") && keyStr[:len("criteria[")] == "criteria[" && keyStr[len(keyStr)-1] == ']' {
+			mapKey := keyStr[len("criteria[") : len(keyStr)-1]
+			req.Criteria[mapKey] = string(value)
+			log.Debug("Manually bound Criteria entry", zap.String("key", mapKey), zap.String("value", string(value)))
+		}
+	})
+	log.Debug("Finished manual binding for Criteria", zap.Any("boundMap", req.Criteria))
+	// --- End Manual Binding ---
+
+	log.Debug("SearchNodes request parameters bound (final)", zap.Any("request", req))
 
 	// Call Service
 	resp, err := networkService.SearchNodes(ctx, &req)

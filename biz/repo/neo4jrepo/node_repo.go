@@ -389,7 +389,7 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 		// 2.0 检查是否是空结果标记
 		if bytes.Equal(cachedData, []byte(SearchEmptyPlaceholder)) {
 			fmt.Printf("INFO: Repo: SearchNodes 缓存命中空标记 (Key: %s)\n", cacheKey) // TODO: 使用日志库
-			return []*network.Node{}, 0, nil                                           // 返回空结果
+			return []*network.Node{}, 0, nil                                    // 返回空结果
 		}
 
 		// 2.1 尝试解析缓存的 ID 列表和总数
@@ -474,6 +474,9 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 
 // searchNodesDirect 是实际执行数据库查询的逻辑 (从原 SearchNodes 提取)
 func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.SearchNodesRequest) ([]*network.Node, int32, error) {
+	// --- 添加日志：打印接收到的请求参数 ---
+	fmt.Printf(">>> Repo: searchNodesDirect called with Request: Type=%v, Limit=%v, Offset=%v, Criteria=%v\n", req.Type, req.Limit, req.Offset, req.Criteria)
+
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
@@ -499,13 +502,21 @@ func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.Sear
 	// nodeType 从 req.Type 获取，已经是 *network.NodeType
 	nodeTypePtr := req.Type
 
+	// --- 添加日志：打印传递给 DAL 的参数 ---
+	fmt.Printf(">>> Repo: Calling DAL ExecSearchNodes with: Criteria=%v, NodeType=%v, Limit=%d, Offset=%d\n", criteria, nodeTypePtr, limit, offset)
+
 	// 调用 DAL 层执行搜索
 	// 确保 DAL 的 ExecSearchNodes 接受 map[string]string 作为 criteria 和 *network.NodeType 作为类型
 	dbNodes, labelsList, total, err := r.nodeDAL.ExecSearchNodes(ctx, session, criteria, nodeTypePtr, limit, offset)
 	if err != nil {
 		// 注意：这里不需要检查 isNotFoundError，因为搜索本身找不到是正常情况，DAL应返回空列表和0 total
+		// --- 添加日志：DAL 调用出错 ---
+		fmt.Printf(">>> Repo: DAL ExecSearchNodes failed: %v\n", err)
 		return nil, 0, fmt.Errorf("repo: 调用 DAL 搜索节点失败: %w", err)
 	}
+
+	// --- 添加日志：打印 DAL 返回结果 ---
+	fmt.Printf(">>> Repo: DAL ExecSearchNodes returned: Nodes=%d, Total=%d\n", len(dbNodes), total)
 
 	// 映射结果
 	resultNodes := make([]*network.Node, 0, len(dbNodes))

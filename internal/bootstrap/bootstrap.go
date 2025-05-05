@@ -17,28 +17,57 @@ import (
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/redis/go-redis/v9"
-	"go.uber.org/zap" // 添加 zap 导入
+	"go.uber.org/zap"         // 添加 zap 导入
+	"go.uber.org/zap/zapcore" // <-- Import zapcore for level constants
 )
 
 // Init 函数执行所有应用程序的初始化步骤
 func Init(configPath string) (*server.Hertz, error) {
-	// 0. 初始化 Zap Logger
-	logger, err := zap.NewProduction() // 或者 zap.NewDevelopment()
+
+	// 1. 加载配置 (移到最前)
+	cfg, err := config.InitConfig(configPath)
 	if err != nil {
-		log.Fatalf("无法初始化 zap logger: %v", err) // 初始 logger 失败时仍用 log
+		// 在 logger 初始化前，只能用标准 log
+		log.Printf("Error: 加载配置失败: %v", err)
+		return nil, fmt.Errorf("加载配置失败: %w", err)
+	}
+	log.Println("Info: 配置加载完成.") // 标准 log
+
+	// 2. 初始化 Zap Logger (使用配置中的级别)
+	var logger *zap.Logger
+	var zapErr error
+	logLevel := zapcore.InfoLevel // 默认为 Info
+	switch cfg.Logging.Level {
+	case "debug":
+		logLevel = zapcore.DebugLevel
+	case "info":
+		logLevel = zapcore.InfoLevel
+	case "warn":
+		logLevel = zapcore.WarnLevel
+	case "error":
+		logLevel = zapcore.ErrorLevel
+	default:
+		log.Printf("Warning: 无效的日志级别 '%s' 在配置中，将使用 'info'", cfg.Logging.Level) // 标准 log
+	}
+
+	// 可以根据需要选择 Production 或 Development 配置
+	// Development 模式更适合开发，输出更易读，包括调用者信息
+	encoderConfig := zap.NewDevelopmentEncoderConfig() // Or zap.NewProductionEncoderConfig()
+	core := zapcore.NewCore(
+		zapcore.NewJSONEncoder(encoderConfig),   // Or NewConsoleEncoder
+		zapcore.AddSync(log.Default().Writer()), // Write to standard log output
+		logLevel,
+	)
+	logger = zap.New(core, zap.AddCaller()) // 添加 AddCaller 来显示文件名和行号
+
+	if zapErr != nil { // Check potential errors during zap.New (though unlikely here)
+		log.Fatalf("无法初始化 zap logger: %v", zapErr)
 	}
 	defer logger.Sync() // 确保缓冲区日志被写入
 
-	// 1. 加载配置
-	cfg, err := config.InitConfig(configPath)
-	if err != nil {
-		logger.Error("加载配置失败", zap.Error(err))
-		return nil, fmt.Errorf("加载配置失败: %w", err)
-	}
-	logger.Info("配置加载完成.")
+	logger.Info("Zap Logger 初始化完成", zap.String("level", cfg.Logging.Level)) // 现在可以使用 logger 了
 
-	// 2. 初始化数据库连接
-	// 将 logger 传递给数据库初始化函数
+	// 3. 初始化数据库连接 (传入配置好的 logger)
 	driver, err := InitDatabase(logger, &cfg.Database.Neo4j)
 	if err != nil {
 		logger.Error("初始化 Neo4j 失败", zap.Error(err))
@@ -51,7 +80,7 @@ func Init(configPath string) (*server.Hertz, error) {
 	}
 	logger.Info("数据库连接初始化完成.")
 
-	// 3. 初始化缓存
+	// 4. 初始化缓存
 	appCache, err := InitCache(logger, redisClient, &cfg.Cache)
 	if err != nil {
 		logger.Error("初始化缓存失败", zap.Error(err))
@@ -59,23 +88,23 @@ func Init(configPath string) (*server.Hertz, error) {
 	}
 	logger.Info("缓存初始化完成.")
 
-	// 4. 初始化 DAL
+	// 5. 初始化 DAL
 	nodeDAL, relationDAL := InitDALs(logger)
 	logger.Info("DAL 初始化完成.")
 
-	// 5. 初始化 Repositories
+	// 6. 初始化 Repositories
 	nodeRepo, relationRepo := InitRepositories(logger, driver, appCache, nodeDAL, relationDAL, &cfg.Cache, &cfg.Repo)
 	logger.Info("Repositories 初始化完成.")
 
-	// 6. 初始化 Service
+	// 7. 初始化 Service
 	networkSvc := InitService(logger, nodeRepo, relationRepo)
 	logger.Info("Service 初始化完成.")
 
-	// 7. 注入依赖到 Handler
+	// 8. 注入依赖到 Handler
 	InjectDependencies(logger, networkSvc)
 	logger.Info("依赖注入 Handler 完成.")
 
-	// 8. 初始化 Hertz 服务器 (不包括路由注册)
+	// 9. 初始化 Hertz 服务器 (不包括路由注册)
 	h := server.New(
 		server.WithHostPorts(cfg.Server.Address),
 		// 添加其他 Hertz 服务器配置 (例如 From կոնֆիգ)
