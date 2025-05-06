@@ -18,6 +18,7 @@ import (
 	"github.com/redis/go-redis/v9" // Or your chosen Redis client library
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap" // <<< 添加 zap 导入
 
 	"labelwall/biz/dal/neo4jdal" // Import the DAL implementation package
 	"labelwall/biz/model/relationship/network"
@@ -117,7 +118,10 @@ func TestMain(m *testing.M) {
 
 	// --- Setup Repositories ---
 	// Create RelationRepo first as NodeRepo depends on it
-	relationRepoInstance := neo4jrepo.NewRelationRepository(testDriver, relationDal, relationCacheImpl, 300, 1000) // Use the specific cache impl, add default params
+	testLogger, _ := zap.NewDevelopment() // 或者 zap.NewNop() 如果不希望看到任何测试日志
+	defer testLogger.Sync()               // S इंपॉर्टेंट: Sync flushes any buffered log entries
+
+	relationRepoInstance := neo4jrepo.NewRelationRepository(testDriver, relationDal, relationCacheImpl, 300, 1000, testLogger) // Use the specific cache impl, add default params
 	// Create NodeRepo, injecting the created RelationRepo
 	nodeRepoInstance := neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, relationRepoInstance, 300, 100, 500, 100, 100, 3, 5, 1000) // Add default params
 

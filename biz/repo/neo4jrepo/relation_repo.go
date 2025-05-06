@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/google/uuid"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
@@ -27,15 +29,6 @@ const (
 	getNodeRelationsEmptyPlaceholder = "__EMPTY_REL_LIST__" // 空结果占位符
 )
 
-// 默认关系缓存时间
-// defaultRelationTTL = 30 * time.Minute // 移除常量
-
-// getNodeRelationsCachePrefix = "relation:list:ids:" // 保留前缀常量
-// getNodeRelationsCacheTTL    = 5 * time.Minute // 移除 TTL 常量
-// 空关系列表结果标记及 TTL
-// getNodeRelationsEmptyPlaceholder = "__EMPTY_REL_LIST__" // 保留占位符
-// getNodeRelationsEmptyTTL         = 1 * time.Minute // 由 cache 包处理或后续看是否配置
-
 // neo4jRelationRepo 实现了 RelationRepository 接口
 type neo4jRelationRepo struct {
 	driver      neo4j.DriverWithContext
@@ -44,6 +37,7 @@ type neo4jRelationRepo struct {
 	// 添加配置字段
 	defaultTTL          time.Duration
 	getNodeRelationsTTL time.Duration
+	logger              *zap.Logger
 }
 
 // NewRelationRepository 创建一个新的 RelationRepository 实例
@@ -54,6 +48,7 @@ func NewRelationRepository(
 	cache cache.RelationAndByteCache,
 	defaultTTLSeconds int,
 	getNodeRelationsTTLSeconds int,
+	logger *zap.Logger,
 ) RelationRepository {
 	return &neo4jRelationRepo{
 		driver:      driver,
@@ -62,6 +57,7 @@ func NewRelationRepository(
 		// 将秒转换为 time.Duration
 		defaultTTL:          time.Duration(defaultTTLSeconds) * time.Second,
 		getNodeRelationsTTL: time.Duration(getNodeRelationsTTLSeconds) * time.Second,
+		logger:              logger,
 	}
 }
 
@@ -109,19 +105,19 @@ func (r *neo4jRelationRepo) GetRelation(ctx context.Context, id string) (*networ
 	if r.cache != nil {
 		cachedRel, err := r.cache.GetRelation(ctx, id)
 		if err == nil {
-			fmt.Printf("Repo: GetRelation cache hit for id: %s\n", id) // TODO: 使用日志库
+			r.logger.Info("Repo: GetRelation cache hit", zap.String("id", id))
 			return cachedRel, nil
 		} else if errors.Is(err, cache.ErrNilValue) {
-			fmt.Printf("Repo: GetRelation cache hit with nil value for id: %s\n", id) // TODO: 使用日志库
+			r.logger.Info("Repo: GetRelation cache hit with nil value", zap.String("id", id))
 			// 返回一个代表未找到的错误，与数据库行为一致
 			return nil, fmt.Errorf("repo: relation %s not found (cached nil): %w", id, err)
 		} else if !errors.Is(err, cache.ErrNotFound) {
-			fmt.Printf("WARN: Repo: 缓存获取关系失败 (id: %s): %v\n", id, err) // TODO: 使用日志库
+			r.logger.Warn("Repo: 缓存获取关系失败", zap.String("id", id), zap.Error(err))
 		}
 	}
 
 	// 2. 从数据库获取
-	fmt.Printf("Repo: GetRelation cache miss for id: %s, querying database...\n", id) // TODO: 使用日志库
+	r.logger.Info("Repo: GetRelation cache miss, querying database", zap.String("id", id))
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
@@ -138,7 +134,7 @@ func (r *neo4jRelationRepo) GetRelation(ctx context.Context, id string) (*networ
 	// 3. 映射结果
 	relType, ok := stringToRelationType(relTypeStr)
 	if !ok {
-		fmt.Printf("WARN: Repo: 无法识别关系 (id: %s) 的类型: %s\n", id, relTypeStr) // TODO: 使用日志库
+		r.logger.Warn("Repo: 无法识别关系 的类型", zap.String("id", id), zap.String("relationType", relTypeStr))
 		return nil, fmt.Errorf("repo: 无法识别的关系类型 %s", relTypeStr)
 	}
 	resultRel := mapDbRelationshipToThriftRelation(dbRel, relType, sourceID, targetID)
@@ -148,7 +144,7 @@ func (r *neo4jRelationRepo) GetRelation(ctx context.Context, id string) (*networ
 		// 使用配置的 TTL
 		setErr := r.cache.SetRelation(ctx, id, resultRel, r.defaultTTL)
 		if setErr != nil {
-			fmt.Printf("WARN: Repo: 缓存设置关系失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
+			r.logger.Warn("Repo: 缓存设置关系失败", zap.String("id", id), zap.Error(setErr))
 		}
 	}
 
@@ -189,7 +185,7 @@ func (r *neo4jRelationRepo) UpdateRelation(ctx context.Context, req *network.Upd
 	// 3. 映射结果
 	relType, ok := stringToRelationType(relTypeStr)
 	if !ok {
-		fmt.Printf("WARN: Repo: 更新后无法识别关系 (id: %s) 的类型: %s\n", req.ID, relTypeStr) // TODO: 使用日志库
+		r.logger.Warn("Repo: 更新后无法识别关系 的类型", zap.String("id", req.ID), zap.String("relationType", relTypeStr))
 		return nil, fmt.Errorf("repo: 更新后无法识别的关系类型 %s", relTypeStr)
 	}
 	updatedRel := mapDbRelationshipToThriftRelation(dbRel, relType, sourceID, targetID)
@@ -198,7 +194,7 @@ func (r *neo4jRelationRepo) UpdateRelation(ctx context.Context, req *network.Upd
 	if r.cache != nil {
 		delErr := r.cache.DeleteRelation(ctx, req.ID)
 		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) {
-			fmt.Printf("WARN: Repo: 缓存删除关系失败 (id: %s): %v\n", req.ID, delErr) // TODO: 使用日志库
+			r.logger.Warn("Repo: 缓存删除关系失败", zap.String("id", req.ID), zap.Error(delErr))
 		}
 	}
 
@@ -225,7 +221,7 @@ func (r *neo4jRelationRepo) DeleteRelation(ctx context.Context, id string) error
 	if r.cache != nil {
 		delErr := r.cache.DeleteRelation(ctx, id)
 		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) {
-			fmt.Printf("WARN: Repo: 缓存删除关系失败 (id: %s): %v\n", id, delErr) // TODO: 使用日志库
+			r.logger.Warn("Repo: 缓存删除关系失败", zap.String("id", id), zap.Error(delErr))
 		}
 	}
 
@@ -269,7 +265,7 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 
 	// 2. 检查缓存是否可用
 	if r.cache == nil {
-		fmt.Println("WARN: Repo: GetNodeRelations cache not initialized, skipping cache.") // TODO: Use logger
+		r.logger.Warn("Repo: GetNodeRelations cache not initialized, skipping cache.")
 		return r.getNodeRelationsDirect(ctx, req, relTypesStr, outgoing, incoming, limit, offset)
 	}
 
@@ -281,14 +277,14 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 	if err == nil { // 缓存命中
 		// 4.1 检查空标记
 		if bytes.Equal(cachedData, []byte(getNodeRelationsEmptyPlaceholder)) {
-			fmt.Printf("INFO: Repo: GetNodeRelations cache hit empty placeholder (Key: %s)\n", cacheKey) // TODO: Use logger
+			r.logger.Info("Repo: GetNodeRelations cache hit empty placeholder", zap.String("cacheKey", cacheKey))
 			return []*network.Relation{}, 0, nil
 		}
 
 		// 4.2 解析缓存的 ID 列表和总数
 		var cachedValue getNodeRelationsCacheValue
 		if err := json.NewDecoder(bytes.NewReader(cachedData)).Decode(&cachedValue); err == nil {
-			fmt.Printf("INFO: Repo: GetNodeRelations cache hit (Key: %s), fetching details...\n", cacheKey) // TODO: Use logger
+			r.logger.Info("Repo: GetNodeRelations cache hit, fetching details", zap.String("cacheKey", cacheKey))
 			resultRelations := make([]*network.Relation, 0, len(cachedValue.RelationIDs))
 			failedFetches := 0
 
@@ -298,9 +294,9 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 				if getErr != nil {
 					failedFetches++
 					if errors.Is(getErr, cache.ErrNotFound) || isNotFoundError(getErr) || errors.Is(getErr, cache.ErrNilValue) {
-						fmt.Printf("WARN: Repo: GetNodeRelations cache hit, but GetRelation couldn't find relation %s\n", relID) // TODO: Use logger
+						r.logger.Warn("Repo: GetNodeRelations cache hit, but GetRelation couldn't find relation", zap.String("relationID", relID))
 					} else {
-						fmt.Printf("ERROR: Repo: GetNodeRelations cache hit, but GetRelation failed for %s: %v\n", relID, getErr) // TODO: Use logger
+						r.logger.Error("Repo: GetNodeRelations cache hit, but GetRelation failed", zap.String("relationID", relID), zap.Error(getErr))
 					}
 					continue // 跳过获取失败的关系
 				}
@@ -309,16 +305,16 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 				}
 			}
 			if failedFetches > 0 {
-				fmt.Printf("WARN: Repo: GetNodeRelations cache hit, but %d relations failed to fetch (Key: %s)\n", failedFetches, cacheKey) // TODO: Use logger
+				r.logger.Warn("Repo: GetNodeRelations cache hit, but relations failed to fetch", zap.Int("failedFetches", failedFetches), zap.String("cacheKey", cacheKey))
 			}
 			return resultRelations, cachedValue.Total, nil
 		}
 		// 缓存数据解析失败，当作未命中
-		fmt.Printf("ERROR: Repo: GetNodeRelations cache data decode failed (Key: %s): %v\n", cacheKey, err) // TODO: Use logger
+		r.logger.Error("Repo: GetNodeRelations cache data decode failed", zap.String("cacheKey", cacheKey), zap.Error(err))
 	} else if !errors.Is(err, cache.ErrNotFound) {
-		fmt.Printf("ERROR: Repo: GetNodeRelations cache get failed (Key: %s): %v\n", cacheKey, err) // TODO: Use logger
+		r.logger.Error("Repo: GetNodeRelations cache get failed", zap.String("cacheKey", cacheKey), zap.Error(err))
 	} else {
-		fmt.Printf("INFO: Repo: GetNodeRelations cache miss (Key: %s)\n", cacheKey) // TODO: Use logger
+		r.logger.Info("Repo: GetNodeRelations cache miss", zap.String("cacheKey", cacheKey))
 	}
 
 	// 5. 缓存未命中或出错，直接查询数据库
@@ -335,9 +331,9 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 			// 依赖 cache 包内部的 NilValueTTL 或需要从配置传入
 			setErr := r.cache.Set(ctx, cacheKey, []byte(getNodeRelationsEmptyPlaceholder), cache.NilValueTTL) // 假设使用 cache.NilValueTTL
 			if setErr != nil {
-				fmt.Printf("ERROR: Repo: GetNodeRelations cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
+				r.logger.Error("Repo: GetNodeRelations cache set empty placeholder failed", zap.String("cacheKey", cacheKey), zap.Error(setErr))
 			} else {
-				fmt.Printf("INFO: Repo: GetNodeRelations set empty placeholder to cache (Key: %s)\n", cacheKey) // TODO: Use logger
+				r.logger.Info("Repo: GetNodeRelations set empty placeholder to cache", zap.String("cacheKey", cacheKey))
 			}
 		} else {
 			// 6.2 提取 ID 并缓存 (使用配置的 TTL)
@@ -346,8 +342,8 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 				if relID := getStringProp(dbRel.Props, "id", ""); relID != "" {
 					relationIDs = append(relationIDs, relID)
 				} else {
-					fmt.Printf("ERROR: Repo: GetNodeRelations DB result relation missing 'id' (ElementId: %s)\n", dbRel.ElementId) // TODO: logger
-					goto SkipCache                                                                                                 // 无法提取所有 ID，跳过缓存
+					r.logger.Error("Repo: GetNodeRelations DB result relation missing 'id'", zap.String("elementId", dbRel.ElementId))
+					goto SkipCache // 无法提取所有 ID，跳过缓存
 				}
 			}
 
@@ -360,12 +356,12 @@ func (r *neo4jRelationRepo) GetNodeRelations(ctx context.Context, req *network.G
 				// 使用配置的 getNodeRelationsTTL
 				setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), r.getNodeRelationsTTL)
 				if setErr != nil {
-					fmt.Printf("ERROR: Repo: GetNodeRelations cache set failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
+					r.logger.Error("Repo: GetNodeRelations cache set failed", zap.String("cacheKey", cacheKey), zap.Error(setErr))
 				} else {
-					fmt.Printf("INFO: Repo: GetNodeRelations set data to cache (Key: %s)\n", cacheKey) // TODO: Use logger
+					r.logger.Info("Repo: GetNodeRelations set data to cache", zap.String("cacheKey", cacheKey))
 				}
 			} else {
-				fmt.Printf("ERROR: Repo: GetNodeRelations cache value encode failed (Key: %s): %v\n", cacheKey, encErr) // TODO: Use logger
+				r.logger.Error("Repo: GetNodeRelations cache value encode failed", zap.String("cacheKey", cacheKey), zap.Error(encErr))
 			}
 		}
 	}
@@ -402,7 +398,7 @@ func (r *neo4jRelationRepo) getNodeRelationsDirectAndRaw(ctx context.Context, re
 		relType, ok := stringToRelationType(relTypeStr)
 		if !ok {
 			relID := getStringProp(dbRel.Props, "id", "[未知ID]")
-			fmt.Printf("WARN: Repo: GetNodeRelations 中无法识别关系 (id: %s) 的类型: %s\n", relID, relTypeStr) // TODO: logger
+			r.logger.Warn("Repo: GetNodeRelations 中无法识别关系 的类型", zap.String("id", relID), zap.String("relationType", relTypeStr))
 			continue
 		}
 
