@@ -204,6 +204,7 @@ func InitRepositories(
 		relationCache,
 		cacheCfg.TTL.DefaultRelation,
 		cacheCfg.TTL.GetNodeRelations,
+		logger,
 	)
 	logger.Info("RelationRepository 创建成功")
 
@@ -220,6 +221,7 @@ func InitRepositories(
 		repoCfg.QueryParams.GetPathMaxDepth,
 		repoCfg.QueryParams.GetPathMaxDepthLimit,
 		repoCfg.QueryParams.SearchNodesDefaultLimit,
+		logger,
 	)
 	logger.Info("NodeRepository 创建成功")
 

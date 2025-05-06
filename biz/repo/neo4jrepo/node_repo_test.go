@@ -123,7 +123,7 @@ func TestMain(m *testing.M) {
 
 	relationRepoInstance := neo4jrepo.NewRelationRepository(testDriver, relationDal, relationCacheImpl, 300, 1000, testLogger) // Use the specific cache impl, add default params
 	// Create NodeRepo, injecting the created RelationRepo
-	nodeRepoInstance := neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, relationRepoInstance, 300, 100, 500, 100, 100, 3, 5, 1000) // Add default params
+	nodeRepoInstance := neo4jrepo.NewNodeRepository(testDriver, nodeDal, testCache, relationRepoInstance, 300, 100, 500, 100, 100, 3, 5, 1000, testLogger) // Add default params and logger
 
 	// --- Assign to Global Test Variables (for node_repo_test.go) ---
 	testRepo = nodeRepoInstance

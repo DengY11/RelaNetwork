@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/google/uuid"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j/dbtype"
@@ -79,6 +81,7 @@ type neo4jNodeRepo struct {
 	getPathMaxDepth         int
 	getPathMaxDepthLimit    int
 	searchNodesDefaultLimit int
+	logger                  *zap.Logger
 }
 
 // NewNodeRepository 创建一个新的 NodeRepository 实例
@@ -97,6 +100,7 @@ func NewNodeRepository(
 	getPathMaxDepth int,
 	getPathMaxDepthLimit int,
 	searchNodesDefaultLimit int,
+	logger *zap.Logger,
 ) NodeRepository {
 	return &neo4jNodeRepo{
 		driver:       driver,
@@ -112,6 +116,7 @@ func NewNodeRepository(
 		getPathMaxDepth:         getPathMaxDepth,
 		getPathMaxDepthLimit:    getPathMaxDepthLimit,
 		searchNodesDefaultLimit: searchNodesDefaultLimit,
+		logger:                  logger,
 	}
 }
 
@@ -168,23 +173,20 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 	if r.cache != nil { // 检查缓存是否已配置
 		cachedNode, err := r.cache.GetNode(ctx, id)
 		if err == nil {
-			// 缓存命中
-			//fmt.Printf("Repo: GetNode cache hit for id: %s\n", id) // TODO: 使用日志库
+			r.logger.Debug("Repo: GetNode cache hit", zap.String("id", id))
 			return cachedNode, nil
 		} else if errors.Is(err, cache.ErrNilValue) {
-			// 缓存命中，但存的是空值 (表示 DB 中不存在)
-			//fmt.Printf("Repo: GetNode cache hit with nil value for id: %s\n", id) // TODO: 使用日志库
+			r.logger.Debug("Repo: GetNode cache hit with nil value", zap.String("id", id))
 			return nil, err // 返回 cache.ErrNilValue 或 repo 层的 NotFound 错误
 		} else if !errors.Is(err, cache.ErrNotFound) {
-			// 缓存读取发生错误 (非 NotFound)
-			//fmt.Printf("WARN: Repo: 缓存获取节点失败 (id: %s): %v\n", id, err) // TODO: 使用日志库
+			r.logger.Warn("Repo: 缓存获取节点失败", zap.String("id", id), zap.Error(err))
 			// 缓存出错，继续尝试从数据库获取，但要记录错误
 		}
 		// 如果是 cache.ErrNotFound，则继续执行数据库查询
 	}
 
 	// 2. 从数据库获取 (缓存未命中或缓存读取失败)
-	fmt.Printf("Repo: GetNode cache miss for id: %s, querying database...\n", id) // TODO: 使用日志库
+	r.logger.Debug("Repo: GetNode cache miss, querying database", zap.String("id", id))
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
 
@@ -196,7 +198,7 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 			if r.cache != nil {
 				setErr := r.cache.SetNode(ctx, id, nil, cache.NilValueTTL) // 缓存空值
 				if setErr != nil {
-					fmt.Printf("WARN: Repo: 缓存设置空值节点失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
+					r.logger.Warn("Repo: 缓存设置空值节点失败", zap.String("id", id), zap.Error(setErr))
 				}
 			}
 			return nil, err // 直接透传 DB 的 Not Found 错误
@@ -209,7 +211,7 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 	nodeType, ok := labelToNodeType(labels) // 使用辅助函数推断类型
 	if !ok {
 		// 如果无法从标签推断出已知的 NodeType，记录警告或返回错误
-		fmt.Printf("WARN: Repo: 无法识别节点 (id: %s) 的标签: %v\n", id, labels) // TODO: 使用日志库
+		r.logger.Warn("Repo: 无法识别节点 的标签", zap.String("id", id), zap.Strings("labels", labels))
 		// 决定如何处理：返回错误、使用默认值、或尝试其他逻辑
 		return nil, fmt.Errorf("repo: 无法识别的节点类型标签 %v", labels)
 	}
@@ -220,7 +222,7 @@ func (r *neo4jNodeRepo) GetNode(ctx context.Context, id string) (*network.Node, 
 		// 使用配置的 TTL
 		setErr := r.cache.SetNode(ctx, id, resultNode, r.defaultNodeTTL)
 		if setErr != nil {
-			fmt.Printf("WARN: Repo: 缓存设置节点失败 (id: %s): %v\n", id, setErr) // TODO: 使用日志库
+			r.logger.Warn("Repo: 缓存设置节点失败", zap.String("id", id), zap.Error(setErr))
 		}
 	}
 
@@ -268,7 +270,7 @@ func (r *neo4jNodeRepo) UpdateNode(ctx context.Context, req *network.UpdateNodeR
 	// 3. 映射结果
 	nodeType, ok := labelToNodeType(labels)
 	if !ok {
-		fmt.Printf("WARN: Repo: 更新后无法识别节点 (id: %s) 的标签: %v\n", req.ID, labels) // TODO: 使用日志库
+		r.logger.Warn("Repo: 更新后无法识别节点 的标签", zap.String("id", req.ID), zap.Strings("labels", labels))
 		return nil, fmt.Errorf("repo: 更新后无法识别的节点类型标签 %v", labels)
 	}
 	updatedNode := mapDbNodeToThriftNode(dbNode, nodeType)
@@ -278,7 +280,7 @@ func (r *neo4jNodeRepo) UpdateNode(ctx context.Context, req *network.UpdateNodeR
 		delErr := r.cache.DeleteNode(ctx, req.ID)
 		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) { // 忽略 NotFound 错误
 			// 删除缓存失败通常记录警告
-			fmt.Printf("WARN: Repo: 缓存删除节点失败 (id: %s): %v\n", req.ID, delErr) // TODO: 使用日志库
+			r.logger.Warn("Repo: 缓存删除节点失败", zap.String("id", req.ID), zap.Error(delErr))
 		}
 	}
 
@@ -307,7 +309,7 @@ func (r *neo4jNodeRepo) DeleteNode(ctx context.Context, id string) error {
 		delErr := r.cache.DeleteNode(ctx, id)
 		if delErr != nil && !errors.Is(delErr, cache.ErrNotFound) { // 忽略 NotFound 错误
 			// 删除缓存失败通常记录警告
-			fmt.Printf("WARN: Repo: 缓存删除节点失败 (id: %s): %v\n", id, delErr) // TODO: 使用日志库
+			r.logger.Warn("Repo: 缓存删除节点失败", zap.String("id", id), zap.Error(delErr))
 		}
 	}
 
@@ -376,7 +378,7 @@ func generateSearchNodesCacheKey(req *network.SearchNodesRequest) string {
 func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNodesRequest) ([]*network.Node, int32, error) {
 	// 0. 检查缓存是否可用
 	if r.cache == nil {
-		fmt.Println("WARN: Repo: Cache 未初始化，跳过 SearchNodes 缓存") // TODO: 使用日志库
+		r.logger.Warn("Repo: Cache 未初始化，跳过 SearchNodes 缓存")
 		return r.searchNodesDirect(ctx, req)
 	}
 
@@ -388,15 +390,15 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 	if err == nil { // 缓存命中
 		// 2.0 检查是否是空结果标记
 		if bytes.Equal(cachedData, []byte(SearchEmptyPlaceholder)) {
-			fmt.Printf("INFO: Repo: SearchNodes 缓存命中空标记 (Key: %s)\n", cacheKey) // TODO: 使用日志库
-			return []*network.Node{}, 0, nil                                    // 返回空结果
+			r.logger.Info("Repo: SearchNodes 缓存命中空标记", zap.String("cacheKey", cacheKey))
+			return []*network.Node{}, 0, nil // 返回空结果
 		}
 
 		// 2.1 尝试解析缓存的 ID 列表和总数
 		var cachedValue searchNodesCacheValue
 		if err := json.NewDecoder(bytes.NewReader(cachedData)).Decode(&cachedValue); err == nil {
 			// 2.1 缓存命中且解析成功
-			fmt.Printf("INFO: Repo: SearchNodes 缓存命中 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+			r.logger.Info("Repo: SearchNodes 缓存命中", zap.String("cacheKey", cacheKey))
 			resultNodes := make([]*network.Node, 0, len(cachedValue.NodeIDs))
 			for _, nodeID := range cachedValue.NodeIDs {
 				// 2.2 使用 GetNode 获取节点详情 (GetNode 会处理自己的缓存)
@@ -404,11 +406,11 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 				if getNodeErr != nil {
 					// 如果节点未找到（可能在缓存结果生成后被删除），可以选择跳过或记录日志
 					if errors.Is(getNodeErr, cache.ErrNotFound) || isNotFoundError(getNodeErr) {
-						fmt.Printf("WARN: Repo: SearchNodes 缓存命中，但 GetNode 未找到节点 %s (可能已被删除)\n", nodeID) // TODO: 使用日志库
+						r.logger.Warn("Repo: SearchNodes 缓存命中，但 GetNode 未找到节点 (可能已被删除)", zap.String("nodeID", nodeID))
 						continue
 					}
 					// 其他 GetNode 错误，可能需要中断或返回错误
-					fmt.Printf("ERROR: Repo: SearchNodes 缓存命中，但 GetNode 失败 (ID: %s): %v\n", nodeID, getNodeErr) // TODO: 使用日志库
+					r.logger.Error("Repo: SearchNodes 缓存命中，但 GetNode 失败", zap.String("nodeID", nodeID), zap.Error(getNodeErr))
 					// 暂定策略：跳过此节点，继续处理其他节点
 					continue
 				}
@@ -419,13 +421,13 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 			return resultNodes, cachedValue.Total, nil
 		}
 		// 缓存数据解析失败，当作缓存未命中处理
-		fmt.Printf("ERROR: Repo: SearchNodes 缓存数据解析失败 (Key: %s): %v\n", cacheKey, err) // TODO: 使用日志库
+		r.logger.Error("Repo: SearchNodes 缓存数据解析失败", zap.String("cacheKey", cacheKey), zap.Error(err))
 	} else if !errors.Is(err, cache.ErrNotFound) {
 		// 非 "Not Found" 的缓存读取错误，记录日志但继续执行数据库查询
-		fmt.Printf("ERROR: Repo: SearchNodes 缓存读取失败 (Key: %s): %v\n", cacheKey, err) // TODO: 使用日志库
+		r.logger.Error("Repo: SearchNodes 缓存读取失败", zap.String("cacheKey", cacheKey), zap.Error(err))
 	} else {
 		// 缓存未命中 (cache.ErrNotFound)
-		fmt.Printf("INFO: Repo: SearchNodes 缓存未命中 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+		r.logger.Info("Repo: SearchNodes 缓存未命中", zap.String("cacheKey", cacheKey))
 	}
 
 	// 3. 缓存未命中或出错，直接查询数据库
@@ -451,20 +453,20 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 			// 使用配置的 TTL
 			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), r.searchNodesTTL)
 			if setErr != nil {
-				fmt.Printf("ERROR: Repo: SearchNodes 缓存写入失败 (Key: %s): %v\n", cacheKey, setErr) // TODO: 使用日志库
+				r.logger.Error("Repo: SearchNodes 缓存写入失败", zap.String("cacheKey", cacheKey), zap.Error(setErr))
 			} else {
-				fmt.Printf("INFO: Repo: SearchNodes 结果已写入缓存 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+				r.logger.Info("Repo: SearchNodes 结果已写入缓存", zap.String("cacheKey", cacheKey))
 			}
 		} else {
-			fmt.Printf("ERROR: Repo: SearchNodes 缓存值序列化失败 (Key: %s): %v\n", cacheKey, err) // TODO: 使用日志库
+			r.logger.Error("Repo: SearchNodes 缓存值序列化失败", zap.String("cacheKey", cacheKey), zap.Error(err))
 		}
 	} else if err == nil && len(resultNodes) == 0 {
 		// 4.1 缓存空结果标记 (使用 cache.NilValueTTL)
 		setErr := r.cache.Set(ctx, cacheKey, []byte(SearchEmptyPlaceholder), cache.NilValueTTL)
 		if setErr != nil {
-			fmt.Printf("ERROR: Repo: SearchNodes 缓存空标记写入失败 (Key: %s): %v\n", cacheKey, setErr) // TODO: 使用日志库
+			r.logger.Error("Repo: SearchNodes 缓存空标记写入失败", zap.String("cacheKey", cacheKey), zap.Error(setErr))
 		} else {
-			fmt.Printf("INFO: Repo: SearchNodes 空结果已写入缓存标记 (Key: %s)\n", cacheKey) // TODO: 使用日志库
+			r.logger.Info("Repo: SearchNodes 空结果已写入缓存标记", zap.String("cacheKey", cacheKey))
 		}
 	}
 
@@ -475,7 +477,11 @@ func (r *neo4jNodeRepo) SearchNodes(ctx context.Context, req *network.SearchNode
 // searchNodesDirect 是实际执行数据库查询的逻辑 (从原 SearchNodes 提取)
 func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.SearchNodesRequest) ([]*network.Node, int32, error) {
 	// --- 添加日志：打印接收到的请求参数 ---
-	fmt.Printf(">>> Repo: searchNodesDirect called with Request: Type=%v, Limit=%v, Offset=%v, Criteria=%v\n", req.Type, req.Limit, req.Offset, req.Criteria)
+	r.logger.Debug("Repo: searchNodesDirect called with Request",
+		zap.Any("type", req.Type),
+		zap.Any("limit", req.Limit),
+		zap.Any("offset", req.Offset),
+		zap.Any("criteria", req.Criteria))
 
 	session := r.driver.NewSession(ctx, neo4j.SessionConfig{AccessMode: neo4j.AccessModeRead})
 	defer session.Close(ctx)
@@ -503,7 +509,11 @@ func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.Sear
 	nodeTypePtr := req.Type
 
 	// --- 添加日志：打印传递给 DAL 的参数 ---
-	fmt.Printf(">>> Repo: Calling DAL ExecSearchNodes with: Criteria=%v, NodeType=%v, Limit=%d, Offset=%d\n", criteria, nodeTypePtr, limit, offset)
+	r.logger.Debug("Repo: Calling DAL ExecSearchNodes with",
+		zap.Any("criteria", criteria),
+		zap.Any("nodeType", nodeTypePtr),
+		zap.Int64("limit", limit),
+		zap.Int64("offset", offset))
 
 	// 调用 DAL 层执行搜索
 	// 确保 DAL 的 ExecSearchNodes 接受 map[string]string 作为 criteria 和 *network.NodeType 作为类型
@@ -511,12 +521,12 @@ func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.Sear
 	if err != nil {
 		// 注意：这里不需要检查 isNotFoundError，因为搜索本身找不到是正常情况，DAL应返回空列表和0 total
 		// --- 添加日志：DAL 调用出错 ---
-		fmt.Printf(">>> Repo: DAL ExecSearchNodes failed: %v\n", err)
+		r.logger.Error("Repo: DAL ExecSearchNodes failed", zap.Error(err))
 		return nil, 0, fmt.Errorf("repo: 调用 DAL 搜索节点失败: %w", err)
 	}
 
 	// --- 添加日志：打印 DAL 返回结果 ---
-	fmt.Printf(">>> Repo: DAL ExecSearchNodes returned: Nodes=%d, Total=%d\n", len(dbNodes), total)
+	r.logger.Debug("Repo: DAL ExecSearchNodes returned", zap.Int("nodesCount", len(dbNodes)), zap.Int64("total", total))
 
 	// 映射结果
 	resultNodes := make([]*network.Node, 0, len(dbNodes))
@@ -525,7 +535,7 @@ func (r *neo4jNodeRepo) searchNodesDirect(ctx context.Context, req *network.Sear
 		nodeType, ok := labelToNodeType(labels) // 使用从DB获取的label来确定类型
 		if !ok {
 			nodeID := getStringProp(dbNode.Props, "id", "[未知ID]")
-			fmt.Printf("WARN: Repo: 搜索结果中无法识别节点 (id: %s) 的标签: %v\n", nodeID, labels) // TODO: 使用日志库
+			r.logger.Warn("Repo: 搜索结果中无法识别节点 的标签", zap.String("nodeID", nodeID), zap.Strings("labels", labels))
 			continue
 		}
 		thriftNode := mapDbNodeToThriftNode(dbNode, nodeType)
@@ -605,7 +615,7 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 
 	// --- Handle Depth == 0 --- (New)
 	if req.Depth == 0 {
-		fmt.Println("INFO: Repo: GetNetwork called with Depth 0, finding start nodes only.") // TODO: Use logger
+		r.logger.Info("Repo: GetNetwork called with Depth 0, finding start nodes only.")
 		// Directly find start nodes using SearchNodes logic
 		searchReq := &network.SearchNodesRequest{
 			Criteria: req.StartNodeCriteria,
@@ -619,7 +629,8 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 			// We'll just use the first one specified if multiple are given for depth=0 case.
 			// A more robust solution might involve modifying SearchNodes or using a different DAL method.
 			if len(req.NodeTypes) > 1 {
-				fmt.Printf("WARN: Repo: GetNetwork with Depth 0 received multiple NodeTypes, using only the first (%s) for start node search.\n", req.NodeTypes[0].String()) // TODO: Use logger
+				r.logger.Warn("Repo: GetNetwork with Depth 0 received multiple NodeTypes, using only the first for start node search.",
+					zap.String("firstNodeType", req.NodeTypes[0].String()))
 			}
 			typePtr := req.NodeTypes[0] // Take the first type
 			searchReq.Type = &typePtr
@@ -639,8 +650,10 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 	// 1. 处理参数和计算默认值
 	var maxDepth int32 = req.Depth // Use the positive depth from the request
 	if maxDepth > 5 {              // 仍然限制最大深度
-		fmt.Printf("WARN: Repo: Requested GetNetwork depth %d > 5, resetting to 5\n", req.Depth) // TODO: Use logger
-		maxDepth = 5                                                                             // Reset to max allowed depth (e.g., 5)
+		r.logger.Warn("Repo: Requested GetNetwork depth too high, resetting to 5",
+			zap.Int32("requestedDepth", req.Depth),
+			zap.Int32("maxDepth", 5))
+		maxDepth = 5 // Reset to max allowed depth (e.g., 5)
 	}
 
 	var limit int64 = 100 // 默认限制
@@ -648,7 +661,7 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 
 	// 2. 检查缓存和 RelationRepository 是否可用
 	if r.cache == nil || r.relationRepo == nil {
-		fmt.Println("WARN: Repo: GetNetwork cache or relationRepo not initialized, skipping cache.") // TODO: Use logger
+		r.logger.Warn("Repo: GetNetwork cache or relationRepo not initialized, skipping cache.")
 		return r.getNetworkDirect(ctx, req, maxDepth, limit, offset)
 	}
 
@@ -660,14 +673,14 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 	if err == nil { // 缓存命中
 		// 4.1 检查空标记
 		if bytes.Equal(cachedData, []byte(GetNetworkEmptyPlaceholder)) {
-			fmt.Printf("INFO: Repo: GetNetwork cache hit empty placeholder (Key: %s)\n", cacheKey) // TODO: Use logger
+			r.logger.Info("Repo: GetNetwork cache hit empty placeholder", zap.String("cacheKey", cacheKey))
 			return []*network.Node{}, []*network.Relation{}, nil
 		}
 
 		// 4.2 解析缓存的 ID 列表
 		var cachedValue getNetworkCacheValue
 		if err := json.NewDecoder(bytes.NewReader(cachedData)).Decode(&cachedValue); err == nil {
-			fmt.Printf("INFO: Repo: GetNetwork cache hit (Key: %s), fetching details...\n", cacheKey) // TODO: Use logger
+			r.logger.Info("Repo: GetNetwork cache hit, fetching details", zap.String("cacheKey", cacheKey))
 			resultNodes := make([]*network.Node, 0, len(cachedValue.NodeIDs))
 			resultRelations := make([]*network.Relation, 0, len(cachedValue.RelationIDs))
 			failedFetches := 0
@@ -678,9 +691,9 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 				if getNodeErr != nil {
 					failedFetches++
 					if errors.Is(getNodeErr, cache.ErrNotFound) || isNotFoundError(getNodeErr) || errors.Is(getNodeErr, cache.ErrNilValue) {
-						fmt.Printf("WARN: Repo: GetNetwork cache hit, but GetNode couldn't find node %s (may be deleted or nil cached)\n", nodeID) // TODO: Use logger
+						r.logger.Warn("Repo: GetNetwork cache hit, but GetNode couldn't find node (may be deleted or nil cached)", zap.String("nodeID", nodeID))
 					} else {
-						fmt.Printf("ERROR: Repo: GetNetwork cache hit, but GetNode failed for %s: %v\n", nodeID, getNodeErr) // TODO: Use logger
+						r.logger.Error("Repo: GetNetwork cache hit, but GetNode failed", zap.String("nodeID", nodeID), zap.Error(getNodeErr))
 					}
 					continue // 跳过获取失败的节点
 				}
@@ -695,9 +708,9 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 				if getRelErr != nil {
 					failedFetches++
 					if errors.Is(getRelErr, cache.ErrNotFound) || isNotFoundError(getRelErr) || errors.Is(getRelErr, cache.ErrNilValue) {
-						fmt.Printf("WARN: Repo: GetNetwork cache hit, but GetRelation couldn't find relation %s (may be deleted or nil cached)\n", relationID) // TODO: Use logger
+						r.logger.Warn("Repo: GetNetwork cache hit, but GetRelation couldn't find relation (may be deleted or nil cached)", zap.String("relationID", relationID))
 					} else {
-						fmt.Printf("ERROR: Repo: GetNetwork cache hit, but GetRelation failed for %s: %v\n", relationID, getRelErr) // TODO: Use logger
+						r.logger.Error("Repo: GetNetwork cache hit, but GetRelation failed", zap.String("relationID", relationID), zap.Error(getRelErr))
 					}
 					continue // 跳过获取失败的关系
 				}
@@ -707,18 +720,20 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 			}
 
 			if failedFetches > 0 {
-				fmt.Printf("WARN: Repo: GetNetwork cache hit, but %d nodes/relations failed to fetch from detail cache/DB (Key: %s)\n", failedFetches, cacheKey) // TODO: Use logger
+				r.logger.Warn("Repo: GetNetwork cache hit, but nodes/relations failed to fetch from detail cache/DB",
+					zap.Int("failedFetches", failedFetches),
+					zap.String("cacheKey", cacheKey))
 			}
 			return resultNodes, resultRelations, nil
 		}
 		// 缓存数据解析失败，当作未命中
-		fmt.Printf("ERROR: Repo: GetNetwork cache data decode failed (Key: %s): %v\n", cacheKey, err) // TODO: Use logger
+		r.logger.Error("Repo: GetNetwork cache data decode failed", zap.String("cacheKey", cacheKey), zap.Error(err))
 
 	} else if !errors.Is(err, cache.ErrNotFound) {
 		// 非 NotFound 的缓存错误，记录并继续查库
-		fmt.Printf("ERROR: Repo: GetNetwork cache get failed (Key: %s): %v\n", cacheKey, err) // TODO: Use logger
+		r.logger.Error("Repo: GetNetwork cache get failed", zap.String("cacheKey", cacheKey), zap.Error(err))
 	} else {
-		fmt.Printf("INFO: Repo: GetNetwork cache miss (Key: %s)\n", cacheKey) // TODO: Use logger
+		r.logger.Info("Repo: GetNetwork cache miss", zap.String("cacheKey", cacheKey))
 	}
 
 	// 5. 缓存未命中或出错，直接查询数据库
@@ -736,9 +751,9 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 		// 6.1 缓存空标记
 		setErr := r.cache.Set(ctx, cacheKey, []byte(GetNetworkEmptyPlaceholder), cache.NilValueTTL)
 		if setErr != nil {
-			fmt.Printf("ERROR: Repo: GetNetwork cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
+			r.logger.Error("Repo: GetNetwork cache set empty placeholder failed", zap.String("cacheKey", cacheKey), zap.Error(setErr))
 		} else {
-			fmt.Printf("INFO: Repo: GetNetwork set empty placeholder to cache (Key: %s)\n", cacheKey) // TODO: Use logger
+			r.logger.Info("Repo: GetNetwork set empty placeholder to cache", zap.String("cacheKey", cacheKey))
 		}
 	} else {
 		// 6.2 提取 ID 并缓存实际结果
@@ -747,15 +762,24 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 		for _, dbNode := range dbNodes {
 			if nodeID := getStringProp(dbNode.Props, "id", ""); nodeID != "" {
 				nodeIDs = append(nodeIDs, nodeID)
+			} else {
+				r.logger.Error("Repo: GetNetwork DB result node missing 'id' property", zap.String("elementId", dbNode.ElementId))
+				// 如果节点没有ID，无法缓存，可能返回错误或跳过缓存
+				goto SkipCache // 跳到缓存步骤之后
 			}
 		}
 		relationIDs := make([]string, 0, len(dbRelations))
 		for _, dbRel := range dbRelations {
 			if relID := getStringProp(dbRel.Props, "id", ""); relID != "" {
 				relationIDs = append(relationIDs, relID)
+			} else {
+				r.logger.Error("Repo: GetNetwork DB result relation missing 'id' property", zap.String("elementId", dbRel.ElementId))
+				// 如果关系没有ID，无法缓存
+				goto SkipCache
 			}
 		}
 
+		// 6.2 序列化并缓存
 		cacheValue := getNetworkCacheValue{
 			NodeIDs:     nodeIDs,
 			RelationIDs: relationIDs,
@@ -764,15 +788,16 @@ func (r *neo4jNodeRepo) GetNetwork(ctx context.Context, req *network.GetNetworkR
 		if encErr := json.NewEncoder(&buffer).Encode(cacheValue); encErr == nil {
 			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), r.getNetworkTTL)
 			if setErr != nil {
-				fmt.Printf("ERROR: Repo: GetNetwork cache set failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
+				r.logger.Error("Repo: GetNetwork cache set failed", zap.String("cacheKey", cacheKey), zap.Error(setErr))
 			} else {
-				fmt.Printf("INFO: Repo: GetNetwork set data to cache (Key: %s)\n", cacheKey) // TODO: Use logger
+				r.logger.Info("Repo: GetNetwork set data to cache", zap.String("cacheKey", cacheKey))
 			}
 		} else {
-			fmt.Printf("ERROR: Repo: GetNetwork cache value encode failed (Key: %s): %v\n", cacheKey, encErr) // TODO: Use logger
+			r.logger.Error("Repo: GetNetwork cache value encode failed", zap.String("cacheKey", cacheKey), zap.Error(encErr))
 		}
 	}
 
+SkipCache:
 	// 7. 返回从数据库获取并映射的结果
 	return resultNodes, resultRelations, nil
 }
@@ -821,7 +846,7 @@ func (r *neo4jNodeRepo) getNetworkDirectAndRaw(ctx context.Context, req *network
 	for _, dbNode := range dbNodes {
 		nodeType, ok := labelToNodeType(dbNode.Labels)
 		if !ok {
-			fmt.Printf("WARN: Repo: GetNetwork 中无法识别节点 (elementId: %s) 的标签: %v\n", dbNode.ElementId, dbNode.Labels) // TODO: logger
+			r.logger.Warn("Repo: GetNetwork 中无法识别节点 的标签", zap.String("elementId", dbNode.ElementId), zap.Strings("labels", dbNode.Labels))
 			continue
 		}
 		thriftNode := mapDbNodeToThriftNode(dbNode, nodeType)
@@ -837,13 +862,16 @@ func (r *neo4jNodeRepo) getNetworkDirectAndRaw(ctx context.Context, req *network
 		sourceNode, sourceExists := nodesMap[dbRel.StartId]
 		targetNode, targetExists := nodesMap[dbRel.EndId]
 		if !sourceExists || !targetExists {
-			fmt.Printf("WARN: Repo: GetNetwork 中关系 (elementId: %s) 的源或目标节点不在返回的节点列表中 (StartId: %d, EndId: %d)\n", dbRel.ElementId, dbRel.StartId, dbRel.EndId) // TODO: logger
+			r.logger.Warn("Repo: GetNetwork 中关系 的源或目标节点不在返回的节点列表中",
+				zap.String("elementId", dbRel.ElementId),
+				zap.Int64("startId", dbRel.StartId),
+				zap.Int64("endId", dbRel.EndId))
 			continue
 		}
 
 		relType, ok := stringToRelationType(dbRel.Type)
 		if !ok {
-			fmt.Printf("WARN: Repo: GetNetwork 中无法识别关系 (elementId: %s) 的类型: %s\n", dbRel.ElementId, dbRel.Type) // TODO: logger
+			r.logger.Warn("Repo: GetNetwork 中无法识别关系 的类型", zap.String("elementId", dbRel.ElementId), zap.String("type", dbRel.Type))
 			continue
 		}
 
@@ -906,7 +934,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 
 	// 2. 检查缓存和 RelationRepository 是否可用
 	if r.cache == nil || r.relationRepo == nil {
-		fmt.Println("WARN: Repo: GetPath cache or relationRepo not initialized, skipping cache.") // TODO: Use logger
+		r.logger.Warn("Repo: GetPath cache or relationRepo not initialized, skipping cache.")
 		return r.getPathDirect(ctx, req, maxDepth, relationTypesStr)
 	}
 
@@ -918,7 +946,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 	if err == nil { // 缓存命中
 		// 4.1 检查空标记
 		if bytes.Equal(cachedData, []byte(GetPathEmptyPlaceholder)) {
-			fmt.Printf("INFO: Repo: GetPath cache hit empty placeholder (Key: %s)\n", cacheKey) // TODO: Use logger
+			r.logger.Info("Repo: GetPath cache hit empty placeholder", zap.String("cacheKey", cacheKey))
 			// 路径未找到，根据接口约定，可能需要返回特定错误而非空列表
 			// return []*network.Node{}, []*network.Relation{}, nil // 或者返回原始的 not found 错误?
 			return nil, nil, fmt.Errorf("repo: path not found (cached empty)") // 返回一个表示未找到的错误
@@ -927,7 +955,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 		// 4.2 解析缓存的 ID 列表
 		var cachedValue getPathCacheValue
 		if err := json.NewDecoder(bytes.NewReader(cachedData)).Decode(&cachedValue); err == nil {
-			fmt.Printf("INFO: Repo: GetPath cache hit (Key: %s), fetching details...\n", cacheKey) // TODO: Use logger
+			r.logger.Info("Repo: GetPath cache hit, fetching details", zap.String("cacheKey", cacheKey))
 			resultNodes := make([]*network.Node, 0, len(cachedValue.NodeIDs))
 			resultRelations := make([]*network.Relation, 0, len(cachedValue.RelationIDs))
 			failedFetches := 0
@@ -938,9 +966,9 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 				if getNodeErr != nil {
 					failedFetches++
 					if errors.Is(getNodeErr, cache.ErrNotFound) || isNotFoundError(getNodeErr) || errors.Is(getNodeErr, cache.ErrNilValue) {
-						fmt.Printf("WARN: Repo: GetPath cache hit, but GetNode couldn't find node %s in path\n", nodeID) // TODO: Use logger
+						r.logger.Warn("Repo: GetPath cache hit, but GetNode couldn't find node in path", zap.String("nodeID", nodeID))
 					} else {
-						fmt.Printf("ERROR: Repo: GetPath cache hit, but GetNode failed for %s: %v\n", nodeID, getNodeErr) // TODO: Use logger
+						r.logger.Error("Repo: GetPath cache hit, but GetNode failed", zap.String("nodeID", nodeID), zap.Error(getNodeErr))
 					}
 					// 如果路径中的节点获取失败，整个路径可能无效，中断处理
 					return nil, nil, fmt.Errorf("repo: failed to reconstruct path from cache, node %s fetch failed: %w", nodeID, getNodeErr)
@@ -956,9 +984,9 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 				if getRelErr != nil {
 					failedFetches++
 					if errors.Is(getRelErr, cache.ErrNotFound) || isNotFoundError(getRelErr) || errors.Is(getRelErr, cache.ErrNilValue) {
-						fmt.Printf("WARN: Repo: GetPath cache hit, but GetRelation couldn't find relation %s in path\n", relationID) // TODO: Use logger
+						r.logger.Warn("Repo: GetPath cache hit, but GetRelation couldn't find relation in path", zap.String("relationID", relationID))
 					} else {
-						fmt.Printf("ERROR: Repo: GetPath cache hit, but GetRelation failed for %s: %v\n", relationID, getRelErr) // TODO: Use logger
+						r.logger.Error("Repo: GetPath cache hit, but GetRelation failed", zap.String("relationID", relationID), zap.Error(getRelErr))
 					}
 					// 如果路径中的关系获取失败，整个路径可能无效，中断处理
 					return nil, nil, fmt.Errorf("repo: failed to reconstruct path from cache, relation %s fetch failed: %w", relationID, getRelErr)
@@ -971,12 +999,12 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 			return resultNodes, resultRelations, nil
 		}
 		// 缓存数据解析失败，当作未命中
-		fmt.Printf("ERROR: Repo: GetPath cache data decode failed (Key: %s): %v\n", cacheKey, err) // TODO: Use logger
+		r.logger.Error("Repo: GetPath cache data decode failed", zap.String("cacheKey", cacheKey), zap.Error(err))
 	} else if !errors.Is(err, cache.ErrNotFound) {
 		// 非 NotFound 的缓存错误，记录并继续查库
-		fmt.Printf("ERROR: Repo: GetPath cache get failed (Key: %s): %v\n", cacheKey, err) // TODO: Use logger
+		r.logger.Error("Repo: GetPath cache get failed", zap.String("cacheKey", cacheKey), zap.Error(err))
 	} else {
-		fmt.Printf("INFO: Repo: GetPath cache miss (Key: %s)\n", cacheKey) // TODO: Use logger
+		r.logger.Info("Repo: GetPath cache miss", zap.String("cacheKey", cacheKey))
 	}
 
 	// 5. 缓存未命中或出错，直接查询数据库
@@ -984,18 +1012,20 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 	if err != nil {
 		// 5.1 处理错误和缓存空占位符
 		if isNotFoundError(err) { // 确保 isNotFoundError 能识别 DAL 的错误和 Repo 包装的错误
-			fmt.Printf("INFO: Repo: GetPath query returned not found (Key: %s), caching empty placeholder.\n", cacheKey)
+			r.logger.Info("Repo: GetPath query returned not found, caching empty placeholder.",
+				zap.String("cacheKey", cacheKey),
+				zap.Error(err)) // Log the original not found error
 			setErr := r.cache.Set(ctx, cacheKey, []byte(GetPathEmptyPlaceholder), cache.NilValueTTL)
 			if setErr != nil {
-				fmt.Printf("ERROR: Repo: GetPath cache set empty placeholder failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
+				r.logger.Error("Repo: GetPath cache set empty placeholder failed", zap.String("cacheKey", cacheKey), zap.Error(setErr))
 			} else {
-				fmt.Printf("INFO: Repo: GetPath set empty placeholder to cache (Key: %s)\n", cacheKey) // TODO: Use logger
+				r.logger.Info("Repo: GetPath set empty placeholder to cache", zap.String("cacheKey", cacheKey))
 			}
 			// 返回原始的 Not Found 错误给调用者
 			return nil, nil, err
 		} else {
 			// 其他数据库错误，直接返回，不缓存占位符
-			fmt.Printf("ERROR: Repo: GetPath query failed (Key: %s): %v\n", cacheKey, err)
+			r.logger.Error("Repo: GetPath query failed", zap.String("cacheKey", cacheKey), zap.Error(err))
 			return nil, nil, err
 		}
 	}
@@ -1010,7 +1040,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 			if nodeID := getStringProp(dbNode.Props, "id", ""); nodeID != "" {
 				nodeIDs = append(nodeIDs, nodeID)
 			} else {
-				fmt.Printf("ERROR: Repo: GetPath DB result node missing 'id' property (ElementId: %s)\n", dbNode.ElementId) // TODO: logger
+				r.logger.Error("Repo: GetPath DB result node missing 'id' property", zap.String("elementId", dbNode.ElementId))
 				// 如果节点没有ID，无法缓存，可能返回错误或跳过缓存
 				goto SkipCache // 跳到缓存步骤之后
 			}
@@ -1020,7 +1050,7 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 			if relID := getStringProp(dbRel.Props, "id", ""); relID != "" {
 				relationIDs = append(relationIDs, relID)
 			} else {
-				fmt.Printf("ERROR: Repo: GetPath DB result relation missing 'id' property (ElementId: %s)\n", dbRel.ElementId) // TODO: logger
+				r.logger.Error("Repo: GetPath DB result relation missing 'id' property", zap.String("elementId", dbRel.ElementId))
 				// 如果关系没有ID，无法缓存
 				goto SkipCache
 			}
@@ -1035,12 +1065,12 @@ func (r *neo4jNodeRepo) GetPath(ctx context.Context, req *network.GetPathRequest
 		if encErr := json.NewEncoder(&buffer).Encode(cacheValue); encErr == nil {
 			setErr := r.cache.Set(ctx, cacheKey, buffer.Bytes(), r.getPathTTL)
 			if setErr != nil {
-				fmt.Printf("ERROR: Repo: GetPath cache set failed (Key: %s): %v\n", cacheKey, setErr) // TODO: Use logger
+				r.logger.Error("Repo: GetPath cache set failed", zap.String("cacheKey", cacheKey), zap.Error(setErr))
 			} else {
-				fmt.Printf("INFO: Repo: GetPath set data to cache (Key: %s)\n", cacheKey) // TODO: Use logger
+				r.logger.Info("Repo: GetPath set data to cache", zap.String("cacheKey", cacheKey))
 			}
 		} else {
-			fmt.Printf("ERROR: Repo: GetPath cache value encode failed (Key: %s): %v\n", cacheKey, encErr) // TODO: Use logger
+			r.logger.Error("Repo: GetPath cache value encode failed", zap.String("cacheKey", cacheKey), zap.Error(encErr))
 		}
 	}
 
@@ -1089,7 +1119,7 @@ func (r *neo4jNodeRepo) getPathDirectAndRaw(ctx context.Context, req *network.Ge
 	for i, dbNode := range dbNodes {
 		nodeType, ok := labelToNodeType(dbNode.Labels)
 		if !ok {
-			fmt.Printf("WARN: Repo: GetPath 中无法识别节点 (elementId: %s) 的标签: %v\n", dbNode.ElementId, dbNode.Labels) // TODO: logger
+			r.logger.Warn("Repo: GetPath 中无法识别节点 的标签", zap.String("elementId", dbNode.ElementId), zap.Strings("labels", dbNode.Labels))
 			err = fmt.Errorf("repo: 路径中节点类型未知 (%v)", dbNode.Labels)
 			return // 映射失败，返回错误
 		}
@@ -1108,14 +1138,17 @@ func (r *neo4jNodeRepo) getPathDirectAndRaw(ctx context.Context, req *network.Ge
 		sourceNode, sourceExists := nodesMap[dbRel.StartId]
 		targetNode, targetExists := nodesMap[dbRel.EndId]
 		if !sourceExists || !targetExists {
-			fmt.Printf("ERROR: Repo: GetPath 中关系 (elementId: %s) 的源或目标节点查找失败 (StartId: %d, EndId: %d)\n", dbRel.ElementId, dbRel.StartId, dbRel.EndId) // TODO: logger
+			r.logger.Error("Repo: GetPath 中关系 的源或目标节点查找失败",
+				zap.String("elementId", dbRel.ElementId),
+				zap.Int64("startId", dbRel.StartId),
+				zap.Int64("endId", dbRel.EndId))
 			err = fmt.Errorf("repo: 路径中关系端点查找失败")
 			return // 映射失败
 		}
 
 		relType, ok := stringToRelationType(dbRel.Type)
 		if !ok {
-			fmt.Printf("WARN: Repo: GetPath 中无法识别关系 (elementId: %s) 的类型: %s\n", dbRel.ElementId, dbRel.Type) // TODO: logger
+			r.logger.Warn("Repo: GetPath 中无法识别关系 的类型", zap.String("elementId", dbRel.ElementId), zap.String("type", dbRel.Type))
 			err = fmt.Errorf("repo: 路径中关系类型未知 (%s)", dbRel.Type)
 			return // 映射失败
 		}
