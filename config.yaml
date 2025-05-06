@@ -39,4 +39,4 @@ repository:
 
 # 日志配置 (示例，可以根据需要扩展)
 logging:
-  level: "error"                   # 日志级别 (debug, info, warn, error) 
+  level: "info"                   # 日志级别 (debug, info, warn, error) 

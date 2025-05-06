@@ -83,7 +83,8 @@ func (s *networkService) CreateNode(ctx context.Context, req *network.CreateNode
 	// 2. 调用 repo 层创建节点
 	node, err := s.nodeRepo.CreateNode(ctx, req)
 	if err != nil {
-		s.logger.Error("Service: CreateNode 失败", zap.Error(err))
+		// 实际应用中应记录错误日志
+		fmt.Printf("Service: CreateNode 失败: %v\n", err)
 		return &network.CreateNodeResponse{Success: false, Message: fmt.Sprintf("创建节点失败: %v", err)}, nil // 可以考虑返回更通用的错误信息
 	}
 
@@ -103,7 +104,7 @@ func (s *networkService) GetNode(ctx context.Context, req *network.GetNodeReques
 			return &network.GetNodeResponse{Success: false, Message: fmt.Sprintf("节点未找到: ID=%s", req.ID)}, nil
 		}
 		// 其他错误
-		s.logger.Error("Service: GetNode 失败", zap.String("nodeID", req.ID), zap.Error(err))
+		fmt.Printf("Service: GetNode 失败 (ID: %s): %v\n", req.ID, err)
 		return nil, fmt.Errorf("获取节点失败: %w", err) // 返回包装后的错误，让上层处理
 	}
 
@@ -123,7 +124,7 @@ func (s *networkService) UpdateNode(ctx context.Context, req *network.UpdateNode
 			return &network.UpdateNodeResponse{Success: false, Message: fmt.Sprintf("要更新的节点未找到: ID=%s", req.ID)}, nil
 		}
 		// 其他错误
-		s.logger.Error("Service: UpdateNode 失败", zap.String("nodeID", req.ID), zap.Error(err))
+		fmt.Printf("Service: UpdateNode 失败 (ID: %s): %v\n", req.ID, err)
 		return nil, fmt.Errorf("更新节点失败: %w", err)
 	}
 
@@ -144,7 +145,7 @@ func (s *networkService) DeleteNode(ctx context.Context, req *network.DeleteNode
 			return &network.DeleteNodeResponse{Success: true, Message: fmt.Sprintf("节点不存在或已被删除: ID=%s", req.ID)}, nil
 		}
 		// 其他错误
-		s.logger.Error("Service: DeleteNode 失败", zap.String("nodeID", req.ID), zap.Error(err))
+		fmt.Printf("Service: DeleteNode 失败 (ID: %s): %v\n", req.ID, err)
 		return nil, fmt.Errorf("删除节点失败: %w", err)
 	}
 
@@ -165,11 +166,7 @@ func (s *networkService) CreateRelation(ctx context.Context, req *network.Create
 	// 2. 调用 repo 层创建关系
 	relation, err := s.relationRepo.CreateRelation(ctx, req)
 	if err != nil {
-		s.logger.Error("Service: CreateRelation 失败",
-			zap.String("sourceID", req.Source),
-			zap.String("targetID", req.Target),
-			zap.String("relationType", req.Type.String()),
-			zap.Error(err))
+		fmt.Printf("Service: CreateRelation 失败: %v\n", err)
 		// 考虑处理特定错误，例如节点不存在
 		return &network.CreateRelationResponse{Success: false, Message: fmt.Sprintf("创建关系失败: %v", err)}, nil
 	}
@@ -190,7 +187,7 @@ func (s *networkService) GetRelation(ctx context.Context, req *network.GetRelati
 			return &network.GetRelationResponse{Success: false, Message: fmt.Sprintf("关系未找到: ID=%s", req.ID)}, nil
 		}
 		// 其他错误
-		s.logger.Error("Service: GetRelation 失败", zap.String("relationID", req.ID), zap.Error(err))
+		fmt.Printf("Service: GetRelation 失败 (ID: %s): %v\n", req.ID, err)
 		return nil, fmt.Errorf("获取关系失败: %w", err)
 	}
 
@@ -210,7 +207,7 @@ func (s *networkService) UpdateRelation(ctx context.Context, req *network.Update
 			return &network.UpdateRelationResponse{Success: false, Message: fmt.Sprintf("要更新的关系未找到: ID=%s", req.ID)}, nil
 		}
 		// 其他错误
-		s.logger.Error("Service: UpdateRelation 失败", zap.String("relationID", req.ID), zap.Error(err))
+		fmt.Printf("Service: UpdateRelation 失败 (ID: %s): %v\n", req.ID, err)
 		return nil, fmt.Errorf("更新关系失败: %w", err)
 	}
 
@@ -230,7 +227,7 @@ func (s *networkService) DeleteRelation(ctx context.Context, req *network.Delete
 			return &network.DeleteRelationResponse{Success: true, Message: fmt.Sprintf("关系不存在或已被删除: ID=%s", req.ID)}, nil
 		}
 		// 其他错误
-		s.logger.Error("Service: DeleteRelation 失败", zap.String("relationID", req.ID), zap.Error(err))
+		fmt.Printf("Service: DeleteRelation 失败 (ID: %s): %v\n", req.ID, err)
 		return nil, fmt.Errorf("删除关系失败: %w", err)
 	}
 
@@ -243,11 +240,11 @@ func (s *networkService) DeleteRelation(ctx context.Context, req *network.Delete
 
 // SearchNodes 处理搜索节点的业务逻辑
 func (s *networkService) SearchNodes(ctx context.Context, req *network.SearchNodesRequest) (*network.SearchNodesResponse, error) {
-	s.logger.Debug("Service: SearchNodes function entered")
+	fmt.Println(">>> Service: SearchNodes function entered <<<") // <-- 添加的调试信息
 	nodes, total, err := s.nodeRepo.SearchNodes(ctx, req)
 	if err != nil {
 		// 搜索失败通常不认为是致命错误，除非是底层连接问题
-		s.logger.Error("Service: SearchNodes 失败", zap.Any("criteria", req.Criteria), zap.Error(err))
+		fmt.Printf("Service: SearchNodes 失败 (Criteria: %v): %v\n", req.Criteria, err)
 		// 可以选择返回空结果或错误
 		return nil, fmt.Errorf("搜索节点失败: %w", err) // 返回错误，让上层决定如何响应
 	}
@@ -265,7 +262,7 @@ func (s *networkService) SearchNodes(ctx context.Context, req *network.SearchNod
 func (s *networkService) GetNodeRelations(ctx context.Context, req *network.GetNodeRelationsRequest) (*network.GetNodeRelationsResponse, error) {
 	relations, total, err := s.relationRepo.GetNodeRelations(ctx, req)
 	if err != nil {
-		s.logger.Error("Service: GetNodeRelations 失败", zap.String("nodeID", req.NodeID), zap.Error(err))
+		fmt.Printf("Service: GetNodeRelations 失败 (NodeID: %s): %v\n", req.NodeID, err)
 		return nil, fmt.Errorf("获取节点关系失败: %w", err)
 	}
 
@@ -281,7 +278,7 @@ func (s *networkService) GetNodeRelations(ctx context.Context, req *network.GetN
 func (s *networkService) GetNetwork(ctx context.Context, req *network.GetNetworkRequest) (*network.GetNetworkResponse, error) {
 	nodes, relations, err := s.nodeRepo.GetNetwork(ctx, req)
 	if err != nil {
-		s.logger.Error("Service: GetNetwork 失败", zap.Any("startCriteria", req.StartNodeCriteria), zap.Error(err))
+		fmt.Printf("Service: GetNetwork 失败 (StartCriteria: %v): %v\n", req.StartNodeCriteria, err)
 		return nil, fmt.Errorf("获取网络图谱失败: %w", err)
 	}
 
@@ -304,10 +301,7 @@ func (s *networkService) GetPath(ctx context.Context, req *network.GetPathReques
 			return &network.GetPathResponse{Success: false, Message: fmt.Sprintf("未找到从 %s 到 %s 的路径", req.SourceID, req.TargetID)}, nil
 		}
 		// 其他错误
-		s.logger.Error("Service: GetPath 失败",
-			zap.String("sourceID", req.SourceID),
-			zap.String("targetID", req.TargetID),
-			zap.Error(err))
+		fmt.Printf("Service: GetPath 失败 (Source: %s, Target: %s): %v\n", req.SourceID, req.TargetID, err)
 		return nil, fmt.Errorf("查询路径失败: %w", err)
 	}
 
