@@ -230,7 +230,7 @@ func InitRepositories(
 
 // InitService 初始化服务层
 func InitService(logger *zap.Logger, nodeRepo neo4jrepo.NodeRepository, relationRepo neo4jrepo.RelationRepository) service.NetworkService {
-	networkSvc := service.NewNetworkService(nodeRepo, relationRepo)
+	networkSvc := service.NewNetworkService(nodeRepo, relationRepo, logger)
 	logger.Info("NetworkService 创建成功")
 	return networkSvc
 }

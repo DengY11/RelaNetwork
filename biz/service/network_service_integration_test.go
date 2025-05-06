@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"labelwall/biz/dal/neo4jdal"
 	"labelwall/biz/model/relationship/network"
@@ -23,11 +24,12 @@ import (
 
 var (
 	testService  service.NetworkService
-	testNodeRepo neo4jrepo.NodeRepository     // Expose repos for potential direct use in tests
-	testRelRepo  neo4jrepo.RelationRepository // Expose repos for potential direct use in tests
+	testNodeRepo neo4jrepo.NodeRepository
+	testRelRepo  neo4jrepo.RelationRepository
 	testDriver   neo4j.DriverWithContext
-	testCache    cache.NodeAndByteCache // Combined cache interface
+	testCache    cache.NodeAndByteCache
 	redisClient  *redis.Client
+	testLogger   *zap.Logger
 )
 
 // Helper function to create a node using the service and return its ID
@@ -131,12 +133,16 @@ func TestMain(m *testing.M) {
 	nodeDal := neo4jdal.NewNodeDAL()
 	relationDal := neo4jdal.NewRelationDAL()
 
+	// --- Create a logger for tests ---
+	testLogger, _ = zap.NewDevelopment() // Or zap.NewNop() for no test output
+	defer testLogger.Sync()
+
 	// --- Setup Repositories ---
-	testRelRepo = neo4jrepo.NewRelationRepository(testDriver, relationDal, redisCacheImpl, 300, 1000)                                 // Pass concrete cache impl, add default params
-	testNodeRepo = neo4jrepo.NewNodeRepository(testDriver, nodeDal, redisCacheImpl, testRelRepo, 300, 100, 500, 100, 100, 3, 5, 1000) // Pass concrete cache impl & relRepo, add default params
+	testRelRepo = neo4jrepo.NewRelationRepository(testDriver, relationDal, redisCacheImpl, 300, 1000, testLogger)
+	testNodeRepo = neo4jrepo.NewNodeRepository(testDriver, nodeDal, redisCacheImpl, testRelRepo, 300, 100, 500, 100, 100, 3, 5, 1000, testLogger)
 
 	// --- Setup Service ---
-	testService = service.NewNetworkService(testNodeRepo, testRelRepo) // Inject real repos
+	testService = service.NewNetworkService(testNodeRepo, testRelRepo, testLogger) // Inject real repos and logger
 
 	// --- Clean Database & Cache Before Running ---
 	clearTestData(context.Background())
