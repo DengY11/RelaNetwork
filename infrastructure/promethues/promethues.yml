@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'hertz_app'
+    metrics_path: /metrics
+    static_configs:
+      - targets: ['host.docker.internal:9091']
+        # 注意: 'host.docker.internal' 在 Docker 容器内部解析到宿主机的 IP。
+        # 如果遇到问题，可以尝试替换为宿主机的局域网 IP (例如 '192.168.1.100:9091')。
+        # 确保 Hertz 应用监听在 Prometheus 可访问的接口。

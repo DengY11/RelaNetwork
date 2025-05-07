@@ -15,6 +15,7 @@ import (
 	"labelwall/pkg/config" // 导入配置包
 
 	"github.com/cloudwego/hertz/pkg/app/server"
+	prometheus "github.com/hertz-contrib/monitor-prometheus" // 新增 Prometheus 监控包导入
 	"github.com/neo4j/neo4j-go-driver/v5/neo4j"
 	"github.com/redis/go-redis/v9"
 	"go.uber.org/zap"         // 添加 zap 导入
@@ -107,9 +108,12 @@ func Init(configPath string) (*server.Hertz, error) {
 	// 9. 初始化 Hertz 服务器 (不包括路由注册)
 	h := server.New(
 		server.WithHostPorts(cfg.Server.Address),
+		// 添加 Prometheus Tracer
+		server.WithTracer(prometheus.NewServerTracer(":9091", "/metrics")),
 		// 添加其他 Hertz 服务器配置 (例如 From կոնֆիգ)
 	)
 	logger.Info("Hertz 服务器实例创建完成.")
+	logger.Info("Prometheus metrics 将在 :9091/metrics 路径暴露.")
 
 	return h, nil // 返回 Hertz 实例，让 main 函数注册路由并启动
 }

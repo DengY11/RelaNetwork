@@ -44,11 +44,50 @@ services:
       timeout: 5s
       retries: 5
 
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: labelwall-prometheus
+    ports:
+      - "9092:9090"
+    volumes:
+      - ./infrastructure/promethues/promethues.yml:/etc/prometheus/prometheus.yml # 修正 prometheus 配置文件路径
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    # depends_on: # 如果您的应用也在 docker-compose 中，可以在这里添加依赖
+      # app:
+        # condition: service_healthy
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: labelwall-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana # 持久化 Grafana 数据
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin # 建议更改默认密码
+      # - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource # 如果需要可以预装插件
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
 # 可选：定义命名卷以持久化数据
-# volumes:
+volumes:
 #   neo4j_data:
 #   neo4j_logs:
 #   neo4j_import:
 #   neo4j_plugins:
 #   neo4j_conf:
-#   redis_data: 
+#   redis_data:
+  grafana_data: {} # 为 Grafana 添加数据卷 
