@@ -16,7 +16,7 @@ database:
 # 缓存配置
 cache:
   prefix: "labelwall:"            # Redis 缓存键前缀
-  estimated_keys: 1000000          # 预估键数量 (用于布隆过滤器等)
+  estimated_keys: 100000          # 预估键数量 (用于布隆过滤器等)
   fp_rate: 0.01                   # 允许的误判率 (用于布隆过滤器等)
   ttl:                            # 缓存过期时间 (秒)
     default_node: 3600            # 节点默认 TTL (1 小时)
@@ -31,12 +31,12 @@ cache:
 # 仓库层配置
 repository:
   query_params:
-    get_network_max_depth: 15      # GetNetwork 查询的最大深度限制
-    get_path_max_depth: 30         # GetPath 查询的最大深度限制 (默认值)
-    get_path_max_depth_limit: 100  # GetPath 查询的最大深度硬限制
+    get_network_max_depth: 3      # GetNetwork 查询的最大深度限制
+    get_path_max_depth: 3         # GetPath 查询的最大深度限制 (默认值)
+    get_path_max_depth_limit: 3  # GetPath 查询的最大深度硬限制
     search_nodes_default_limit: 10 # SearchNodes 默认分页大小
     get_node_relations_default_limit: 10 # GetNodeRelations 默认分页大小
 
 # 日志配置 (示例，可以根据需要扩展)
 logging:
-  level: "info"                   # 日志级别 (debug, info, warn, error) 
+  level: "error"                   # 日志级别 (debug, info, warn, error) 

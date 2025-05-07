@@ -31,12 +31,12 @@ export const options = {
     default: {
       executor: 'ramping-vus',
       stages: [ // 使用你之前调整的更高负载
-        { duration: '30s', target: 2000 }, // 保持较低的起始值以便观察
-        { duration: '1m', target: 2000 },
-        { duration: '10s', target: 5000 },
-        { duration: '1m', target: 5000 },
-        { duration: '10s', target: 10000 },
-        { duration: '1m', target: 10000 },
+        { duration: '30s', target: 200 }, // 保持较低的起始值以便观察
+        { duration: '1m', target: 200 },
+        { duration: '10s', target: 500 },
+        { duration: '1m', target: 500 },
+        { duration: '10s', target: 1000 },
+        { duration: '1m', target: 1000 },
         { duration: '20s', target: 0 },
        ],
       gracefulRampDown: '30s',
