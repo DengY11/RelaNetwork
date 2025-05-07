@@ -6,6 +6,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"labelwall/pkg/config" // 确保导入我们修改的配置包
 	"log"
 	"strings"
 	"time"
@@ -23,46 +24,71 @@ func ApplyNeo4jSchemaIfNeeded(ctx context.Context, driver neo4j.DriverWithContex
 }
 
 // InitNeo4j 初始化 Neo4j 驱动并应用 Schema
-// 返回创建好的驱动实例，如果初始化失败则返回错误。
-func InitNeo4j(config Neo4jConfig) (neo4j.DriverWithContext, error) {
-	// 使用配置创建驱动
-	driver, err := neo4j.NewDriverWithContext(
-		config.URI,
-		neo4j.BasicAuth(config.Username, config.Password, ""),
-	)
+// 修改为使用 pkg/config.Neo4jConfig 并应用连接池配置
+func InitNeo4j(cfg *config.Neo4jConfig) (neo4j.DriverWithContext, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("Neo4j 配置不能为空")
+	}
+	auth := neo4j.BasicAuth(cfg.Username, cfg.Password, "")
+
+	// 创建驱动，并传入配置函数
+	driver, err := neo4j.NewDriverWithContext(cfg.URI, auth, func(neo4jCfg *neo4j.Config) {
+		// 应用连接池配置
+		if cfg.MaxConnectionPoolSize > 0 {
+			neo4jCfg.MaxConnectionPoolSize = cfg.MaxConnectionPoolSize
+			log.Printf("Info: Neo4j MaxConnectionPoolSize 设置为: %d", cfg.MaxConnectionPoolSize)
+		} else {
+			log.Printf("Info: Neo4j MaxConnectionPoolSize 使用驱动默认值 (当前配置值: %d)", cfg.MaxConnectionPoolSize)
+		}
+
+		if cfg.ConnectionAcquisitionTimeout > 0 {
+			neo4jCfg.ConnectionAcquisitionTimeout = time.Duration(cfg.ConnectionAcquisitionTimeout) * time.Second
+			log.Printf("Info: Neo4j ConnectionAcquisitionTimeout 设置为: %v", neo4jCfg.ConnectionAcquisitionTimeout)
+		} else {
+			log.Printf("Info: Neo4j ConnectionAcquisitionTimeout 使用驱动默认值 (当前配置值: %d s)", cfg.ConnectionAcquisitionTimeout)
+		}
+
+		if cfg.MaxConnectionLifetime > 0 {
+			neo4jCfg.MaxConnectionLifetime = time.Duration(cfg.MaxConnectionLifetime) * time.Second
+			log.Printf("Info: Neo4j MaxConnectionLifetime 设置为: %v", neo4jCfg.MaxConnectionLifetime)
+		} else {
+			log.Printf("Info: Neo4j MaxConnectionLifetime 使用驱动默认值 (通常是无限，当前配置值: %d s)", cfg.MaxConnectionLifetime)
+		}
+		// neo4jCfg.UserAgent = "labelwall/1.0.0" // 可选: 设置 UserAgent
+	})
+
 	if err != nil {
 		return nil, fmt.Errorf("无法创建 Neo4j 驱动: %w", err)
 	}
 
+	// 验证连接性
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-
-	// 检查连接性
 	if err := driver.VerifyConnectivity(ctx); err != nil {
-		driver.Close(ctx) // 关闭无效的驱动
+		driver.Close(ctx)
 		return nil, fmt.Errorf("无法连接到 Neo4j: %w", err)
 	}
-	log.Println("成功连接到 Neo4j") // 保留 log.Println
+	log.Println("成功连接到 Neo4j")
 
-	// 应用 Schema (索引和约束) - 使用内部未修改的 applyNeo4jSchema
-	// 注意：这里调用的是只需要 driver 的旧版签名，但内部实现将被下面的 zap 版本覆盖
-	// 为了最小化改动，暂时保留此调用结构，但 bootstrap 初始化时应使用 ApplyNeo4jSchemaIfNeeded
+	// 应用 Schema (假设总是需要)
 	if err := applyNeo4jSchemaLegacy(ctx, driver); err != nil {
-		// 通常不应因为 Schema 初始化失败而停止服务，记录警告即可
-		log.Printf("警告: 应用 Neo4j Schema 失败: %v", err) // 保留 log.Printf
+		log.Printf("警告: 应用 Neo4j Schema 失败: %v", err)
 	} else {
-		log.Println("成功应用 Neo4j Schema") // 保留 log.Println
+		log.Println("成功应用 Neo4j Schema")
 	}
 
 	return driver, nil
 }
 
 // InitRedis 初始化 Redis 客户端连接
-func InitRedis(config RedisConfig) (*redis.Client, error) {
+func InitRedis(cfg *config.RedisConfig) (*redis.Client, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("Redis 配置不能为空")
+	}
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     config.Addr,
-		Password: config.Password, // no password set
-		DB:       config.DB,       // use default DB
+		Addr:     cfg.Addr,
+		Password: cfg.Password, // no password set
+		DB:       cfg.DB,       // use default DB
 	})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -70,10 +96,10 @@ func InitRedis(config RedisConfig) (*redis.Client, error) {
 
 	status := rdb.Ping(ctx)
 	if err := status.Err(); err != nil {
-		return nil, fmt.Errorf("无法连接到 Redis (%s): %w", config.Addr, err)
+		return nil, fmt.Errorf("无法连接到 Redis (%s): %w", cfg.Addr, err)
 	}
 
-	fmt.Printf("成功连接到 Redis (%s)\n", config.Addr) // 保留 fmt.Printf
+	fmt.Printf("成功连接到 Redis (%s)\n", cfg.Addr) // 保留 fmt.Printf
 	return rdb, nil
 }
 
@@ -98,15 +124,19 @@ func applyNeo4jSchemaLegacy(ctx context.Context, driver neo4j.DriverWithContext)
 		_, err := session.Run(ctx, query, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "already exists") || strings.Contains(err.Error(), "Constraint already exists") {
-				fmt.Printf("Schema (索引/约束) 已存在，跳过: %s\n", query) // 保留 fmt.Printf
+				fmt.Printf("Schema (索引/约束) 已存在，跳过: %s\n", query)
 				continue
+			}
+			if strings.Contains(err.Error(), "Invalid input") && strings.Contains(query, "relation_id_index") {
+				log.Printf("警告: 创建关系索引 '%s' 时可能存在语法问题。错误: %v. 请检查你的 Neo4j 版本对应的正确语法。", query, err)
+				// continue // or return error
 			}
 			return fmt.Errorf("执行 schema 查询失败 '%s': %w", query, err)
 		}
-		fmt.Printf("成功应用 schema: %s\n", query) // 保留 fmt.Printf
+		fmt.Printf("成功应用 schema: %s\n", query)
 	}
 
-	fmt.Println("Neo4j schema 应用完成") // 保留 fmt.Println
+	fmt.Println("Neo4j schema 应用完成")
 	return nil
 }
 
@@ -144,6 +174,10 @@ func applyNeo4jSchema(ctx context.Context, session neo4j.SessionWithContext, log
 				// 使用 zap logger 替换 fmt.Printf
 				logger.Debug("Schema (索引/约束) 已存在，跳过", zap.String("query", query))
 				continue
+			}
+			if strings.Contains(err.Error(), "Invalid input") && strings.Contains(query, "relation_id_index") {
+				logger.Warn("创建关系索引时可能存在语法问题", zap.String("query", query), zap.Error(err), zap.String("suggestion", "请检查你的 Neo4j 版本对应的正确语法。"))
+				// continue
 			}
 			// 使用 zap logger 记录错误
 			logger.Error("执行 schema 查询失败", zap.String("query", query), zap.Error(err))

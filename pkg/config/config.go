@@ -30,9 +30,12 @@ type DatabaseConfig struct {
 
 // Neo4jConfig Neo4j 连接配置
 type Neo4jConfig struct {
-	URI      string `mapstructure:"uri"`
-	Username string `mapstructure:"username"`
-	Password string `mapstructure:"password"`
+	URI                          string `mapstructure:"uri"`
+	Username                     string `mapstructure:"username"`
+	Password                     string `mapstructure:"password"`
+	MaxConnectionPoolSize        int    `mapstructure:"max_connection_pool_size"`               // 最大连接池大小
+	ConnectionAcquisitionTimeout int    `mapstructure:"connection_acquisition_timeout_seconds"` // 连接获取超时时间（秒）
+	MaxConnectionLifetime        int    `mapstructure:"max_connection_lifetime_seconds"`        // 连接最大生命周期（秒）
 }
 
 // RedisConfig Redis 连接配置
