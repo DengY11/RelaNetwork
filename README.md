@@ -425,7 +425,7 @@ struct Relation {
 - **端点**: `GET /api/v1/network`
 - **描述**: 根据起始节点条件查询相关节点及其关系网络
 - **查询参数**:
-    - `startNodeCriteria` - 可选, 用于查找起始节点的条件 map (e.g., `startNodeCriteria[profession]=工程师`, `startNodeCriteria[id]=node123`)。
+    - `startNodeCriteria` - 可选, 用于查找起始节点的条件 map (e.g., `startNodeCriteria[profession]=工程师`, `startNodeCriteria[id]=node123`)。map为空时匹配所有节点。
     - `depth` - 可选，从起始节点扩展的查询深度，默认为1。`0` 表示只返回起始节点。负数无效。
     - `relationTypes` - 可选, 关系类型列表 (e.g., `1,3`)，用于过滤遍历的关系。
     - `nodeTypes` - 可选, 节点类型列表 (e.g., `1,2`)，用于过滤最终结果中的节点。
