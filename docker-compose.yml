@@ -50,7 +50,7 @@ services:
     ports:
       - "9092:9090"
     volumes:
-      - ./infrastructure/promethues/promethues.yml:/etc/prometheus/prometheus.yml # 修正 prometheus 配置文件路径
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml # 修正了路径中的拼写错误
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
     healthcheck:
@@ -82,6 +82,28 @@ services:
       prometheus:
         condition: service_healthy
 
+  nginx:
+    image: nginx:latest
+    container_name: labelwall-nginx-proxy
+    ports:
+      - "8083:80" # 将主机的端口更改为 8083
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro # 挂载Nginx配置文件 (只读)
+      - nginx_cache_data:/var/cache/nginx/network_cache     # 挂载缓存数据卷
+    # depends_on 和 app 健康检查已移除，因为 app 不在 compose 管理范围内
+    # 如果您的 Go 应用启动较慢，Nginx 可能会在 Go 应用就绪前尝试连接并失败。
+    # 您可能需要手动确保 Go 应用已启动，或者为 Nginx 添加更复杂的启动延迟/重试逻辑 (通常在入口脚本中完成)
+    healthcheck:
+      # Nginx 的健康检查现在依赖于 Go 应用在 host.docker.internal:8888/health 是否可达
+      # 确保 Go 应用监听 0.0.0.0:8888 并且 /health 端点存在
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://host.docker.internal:8888/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s # (可选) 给Go应用一些启动时间
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 # 可选：定义命名卷以持久化数据
 volumes:
 #   neo4j_data:
@@ -90,4 +112,5 @@ volumes:
 #   neo4j_plugins:
 #   neo4j_conf:
 #   redis_data:
-  grafana_data: {} # 为 Grafana 添加数据卷 
+  grafana_data: {} # 为 Grafana 添加数据卷
+  nginx_cache_data: {} # 为 Nginx 缓存定义命名卷 
