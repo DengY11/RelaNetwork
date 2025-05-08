@@ -34,12 +34,12 @@ cache:
 # 仓库层配置
 repository:
   query_params:
-    get_network_max_depth: 3      # GetNetwork 查询的最大深度限制
-    get_path_max_depth: 3         # GetPath 查询的最大深度限制 (默认值)
+    get_network_max_depth: 5      # GetNetwork 查询的最大深度限制
+    get_path_max_depth: 5         # GetPath 查询的最大深度限制 (默认值)
     get_path_max_depth_limit: 3  # GetPath 查询的最大深度硬限制
     search_nodes_default_limit: 10 # SearchNodes 默认分页大小
     get_node_relations_default_limit: 10 # GetNodeRelations 默认分页大小
 
 # 日志配置 (示例，可以根据需要扩展)
 logging:
-  level: "info"                   # 日志级别 (debug, info, warn, error) 
+  level: "warn"                   # 日志级别 (debug, info, warn, error) 
