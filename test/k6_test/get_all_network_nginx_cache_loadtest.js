@@ -24,9 +24,9 @@ export const options = {
       executor: 'ramping-vus',
       startVUs: 1,
       stages: [
-        { duration: '1m', target: 1000 },   // 缓慢增加VU，让缓存有机会预热
-        { duration: '3m', target: 10000 },  // 增加负载，观察缓存效果
-        { duration: '1m', target: 10000 },  // 保持中等负载
+        { duration: '2m', target: 10000 },   // 缓慢增加VU，让缓存有机会预热
+        { duration: '2m', target: 20000 },  // 增加负载，观察缓存效果
+        { duration: '1m', target: 20000 },  // 保持中等负载
         { duration: '30s', target: 0 },   // 逐渐减少VU
       ],
       gracefulRampDown: '30s',

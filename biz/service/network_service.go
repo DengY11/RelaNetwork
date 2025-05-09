@@ -39,23 +39,20 @@ func isNotFoundError(err error) bool {
 // NetworkService 定义了关系网络服务的业务逻辑接口
 // 这些方法对应 Thrift service 中的定义
 type NetworkService interface {
-	// 网络查询
 	GetNetwork(ctx context.Context, req *network.GetNetworkRequest) (*network.GetNetworkResponse, error)
-	// 路径查询
 	GetPath(ctx context.Context, req *network.GetPathRequest) (*network.GetPathResponse, error)
-	// 搜索节点
 	SearchNodes(ctx context.Context, req *network.SearchNodesRequest) (*network.SearchNodesResponse, error)
-	// 节点 CRUD
+
 	CreateNode(ctx context.Context, req *network.CreateNodeRequest) (*network.CreateNodeResponse, error)
 	GetNode(ctx context.Context, req *network.GetNodeRequest) (*network.GetNodeResponse, error)
 	UpdateNode(ctx context.Context, req *network.UpdateNodeRequest) (*network.UpdateNodeResponse, error)
 	DeleteNode(ctx context.Context, req *network.DeleteNodeRequest) (*network.DeleteNodeResponse, error)
-	// 关系 CRUD
+
 	CreateRelation(ctx context.Context, req *network.CreateRelationRequest) (*network.CreateRelationResponse, error)
 	GetRelation(ctx context.Context, req *network.GetRelationRequest) (*network.GetRelationResponse, error)
 	UpdateRelation(ctx context.Context, req *network.UpdateRelationRequest) (*network.UpdateRelationResponse, error)
 	DeleteRelation(ctx context.Context, req *network.DeleteRelationRequest) (*network.DeleteRelationResponse, error)
-	// 获取节点的所有关系
+
 	GetNodeRelations(ctx context.Context, req *network.GetNodeRelationsRequest) (*network.GetNodeRelationsResponse, error)
 }
 

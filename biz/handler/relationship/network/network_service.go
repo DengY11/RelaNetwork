@@ -26,19 +26,19 @@ var (
 // This is typically called during application initialization (e.g., in bootstrap.go).
 func SetNetworkService(svc service.NetworkService, log *zap.Logger) { // Modify to accept logger
 	if networkService != nil || logger != nil {
-		// Use the incoming logger if available, otherwise use the existing one for the warning
 		logToUse := log
 		if logToUse == nil {
-			logToUse = logger // Use existing package logger if new one is nil
+			logToUse = logger
 		}
-		if logToUse != nil { // Check if any logger is available
+		if logToUse != nil {
 			logToUse.Warn("NetworkService or Logger is being re-initialized")
 		} else {
+			// handler的logger还没有初始化好，所以这里还是用fmt打印报错
 			fmt.Println("Warning: NetworkService or Logger is being re-initialized (logger not available for warning)")
 		}
 	}
 	networkService = svc
-	logger = log // Set the package-level logger
+	logger = log
 }
 
 // ensureLogger checks if the package logger is initialized and returns a default Nop logger if not.

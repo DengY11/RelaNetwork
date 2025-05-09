@@ -25,19 +25,15 @@ import (
 // Init 函数执行所有应用程序的初始化步骤
 func Init(configPath string) (*server.Hertz, error) {
 
-	// 1. 加载配置 (移到最前)
-	cfg, err := config.InitConfig(configPath)
+	cfg, err := config.InitConfig(configPath) //加载配置
 	if err != nil {
-		// 在 logger 初始化前，只能用标准 log
 		log.Printf("Error: 加载配置失败: %v", err)
 		return nil, fmt.Errorf("加载配置失败: %w", err)
 	}
-	log.Println("Info: 配置加载完成.") // 标准 log
+	log.Println("Info: 配置加载完成.")
 
-	// 2. 初始化 Zap Logger (使用配置中的级别)
 	var logger *zap.Logger
-	var zapErr error
-	logLevel := zapcore.InfoLevel // 默认为 Info
+	logLevel := zapcore.InfoLevel
 	switch cfg.Logging.Level {
 	case "debug":
 		logLevel = zapcore.DebugLevel
@@ -61,14 +57,16 @@ func Init(configPath string) (*server.Hertz, error) {
 	)
 	logger = zap.New(core, zap.AddCaller()) // 添加 AddCaller 来显示文件名和行号
 
-	if zapErr != nil { // Check potential errors during zap.New (though unlikely here)
-		log.Fatalf("无法初始化 zap logger: %v", zapErr)
-	}
-	defer logger.Sync() // 确保缓冲区日志被写入
+	defer func(logger *zap.Logger) {
+		err := logger.Sync()
+		if err != nil {
+			log.Printf("error: zap logger缓冲区日志写入失败！")
+		}
+	}(logger) // 确保缓冲区日志被写入
 
-	logger.Info("Zap Logger 初始化完成", zap.String("level", cfg.Logging.Level)) // 现在可以使用 logger 了
+	logger.Info("Zap Logger 初始化完成", zap.String("level", cfg.Logging.Level))
 
-	// 3. 初始化数据库连接 (传入配置好的 logger)
+	// 3.连接数据库
 	driver, err := InitDatabase(logger, &cfg.Database.Neo4j)
 	if err != nil {
 		logger.Error("初始化 Neo4j 失败", zap.Error(err))
@@ -120,7 +118,6 @@ func Init(configPath string) (*server.Hertz, error) {
 
 // InitDatabase 初始化 Neo4j 数据库连接
 func InitDatabase(logger *zap.Logger, cfg *config.Neo4jConfig) (neo4j.DriverWithContext, error) {
-	// 注意：不再需要调用旧的 database.InitNeo4j
 	driver, err := neo4j.NewDriverWithContext(
 		cfg.URI,
 		neo4j.BasicAuth(cfg.Username, cfg.Password, ""),
@@ -141,7 +138,10 @@ func InitDatabase(logger *zap.Logger, cfg *config.Neo4jConfig) (neo4j.DriverWith
 	defer cancel()
 
 	if err := driver.VerifyConnectivity(ctx); err != nil {
-		driver.Close(ctx)
+		err := driver.Close(ctx)
+		if err != nil {
+			return nil, err
+		}
 		return nil, fmt.Errorf("Neo4j 连接验证失败: %w", err)
 	}
 	logger.Info("成功验证 Neo4j 连接")
@@ -239,8 +239,7 @@ func InitService(logger *zap.Logger, nodeRepo neo4jrepo.NodeRepository, relation
 	return networkSvc
 }
 
-// InjectDependencies 注入依赖到 Handler
-// 同时注入 logger
+// InjectDependencies 注入依赖(service和logger)到 Handler
 func InjectDependencies(logger *zap.Logger, networkSvc service.NetworkService) {
 	network.SetNetworkService(networkSvc, logger) // 将 logger 传递给 SetNetworkService
 	logger.Info("NetworkService 和 Logger 成功注入到 Network Handler")
