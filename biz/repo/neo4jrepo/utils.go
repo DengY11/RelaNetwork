@@ -15,19 +15,16 @@ var ErrPathNotFound = errors.New("repo: path not found")
 // --- 通用辅助函数 ---
 
 // isNotFoundError 检查错误是否表示"未找到"
-// REPLACED with more robust logic
+// TODO:这个地方需要鲁棒性更强的实现
 func isNotFoundError(err error) bool {
 	if err == nil {
 		return false
 	}
-	// 1. 检查 Repo 层定义的 ErrPathNotFound (defined above)
+
 	if errors.Is(err, ErrPathNotFound) {
 		return true
 	}
 
-	// 2. DAL 层错误检查 (remains difficult without exported errors)
-
-	// 3. 字符串检查后备
 	lowerCaseErr := strings.ToLower(err.Error())
 	if strings.Contains(lowerCaseErr, "not found") {
 		return true
@@ -60,11 +57,10 @@ func labelToNodeType(labels []string) (network.NodeType, bool) {
 
 // stringToRelationType 从 Neo4j 关系类型字符串推断 Thrift RelationType
 func stringToRelationType(relTypeStr string) (network.RelationType, bool) {
-	// 使用 Thrift 生成的 FromString 函数进行查找
 	if relType, err := network.RelationTypeFromString(relTypeStr); err == nil {
 		return relType, true
 	}
-	return network.RelationType(0), false // 未找到匹配的关系类型
+	return network.RelationType(0), false
 }
 
 // mapDbNodeToThriftNode 将 Neo4j 节点对象转换为 Thrift Node 对象
@@ -101,8 +97,6 @@ func mapDbRelationshipToThriftRelation(dbRel any, relType network.RelationType, 
 	var props map[string]any
 
 	switch r := dbRel.(type) {
-	// case neo4j.Relationship: // 暂时移除，看是否与 dbtype.Relationship 冲突
-	//  props = r.Props
 	case dbtype.Relationship: // 保留这个更通用的类型
 		props = r.Props
 	default:
