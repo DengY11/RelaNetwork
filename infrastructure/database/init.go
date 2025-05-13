@@ -113,7 +113,7 @@ func applyNeo4jSchemaLegacy(ctx context.Context, driver neo4j.DriverWithContext)
 		"CREATE CONSTRAINT person_id_unique IF NOT EXISTS FOR (p:PERSON) REQUIRE p.id IS UNIQUE",
 		"CREATE CONSTRAINT company_id_unique IF NOT EXISTS FOR (c:COMPANY) REQUIRE c.id IS UNIQUE",
 		"CREATE CONSTRAINT school_id_unique IF NOT EXISTS FOR (s:SCHOOL) REQUIRE s.id IS UNIQUE",
-		"CREATE INDEX relation_id_index IF NOT EXISTS FOR ()-[r]-() ON (r.id)",
+		"CREATE INDEX relation_id_index IF NOT EXISTS FOR ()-[r:RELATIONSHIP]-() ON (r.id)",
 		"CREATE INDEX person_name_index IF NOT EXISTS FOR (p:PERSON) ON (p.name)",
 		"CREATE INDEX person_profession_index IF NOT EXISTS FOR (p:PERSON) ON (p.profession)",
 		"CREATE INDEX company_name_index IF NOT EXISTS FOR (c:COMPANY) ON (c.name)",
@@ -153,7 +153,7 @@ func applyNeo4jSchema(ctx context.Context, session neo4j.SessionWithContext, log
 
 		// 关系 ID 唯一性约束 (Neo4j 默认不支持直接对关系属性加唯一约束，通常关系ID业务生成并确保唯一)
 		// 可以为关系属性创建索引以加速查找
-		"CREATE INDEX relation_id_index IF NOT EXISTS FOR ()-[r]-() ON (r.id)",
+		"CREATE INDEX relation_id_index IF NOT EXISTS FOR ()-[r:RELATIONSHIP]-() ON (r.id)",
 
 		// 为常用查询字段创建索引
 		"CREATE INDEX person_name_index IF NOT EXISTS FOR (p:PERSON) ON (p.name)",
