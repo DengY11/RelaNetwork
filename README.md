@@ -543,7 +543,12 @@ relationship-network/
 │   ├── repo/neo4jrepo/               # Repository 层实现
 │   └── service/relationship/network/ # Service 层实现
 ├── infrastructure/                   # 基础设施目录
-│   └── database/                     # 初始化与连接实现
+│   ├── database/                     # 初始化与连接实现
+│   └── prometheus/                   # Prometheus 相关配置
+│       └── prometheus.yml            # Prometheus 配置文件
+├── nginx/                            # Nginx 配置目录
+│   └── nginx.conf                    # Nginx 配置文件
+├── docker-compose.yml                # Docker Compose 配置文件
 ├── script/                           # 脚本目录
 ├── output/                           # 产物输出目录
 └── README.md                         # 项目说明文档
@@ -635,6 +640,75 @@ func CreateNode(ctx context.Context, c *app.RequestContext) {
 5.  **缓存键设计**: 
     *   使用明确的前缀（如 `node:`, `relation:`, `search:nodes:ids:`, `network:graph:ids:`）区分不同类型的缓存。
     *   对于包含用户输入（如搜索关键字）或可变参数列表（如关系类型）的 Key，使用 SHA1 哈希处理，确保 Key 的格式规范且长度可控。
+
+### 6.5 Nginx 代理与缓存
+
+本项目使用 Nginx 作为反向代理，部署在 Go 应用（LabelWall API 服务）之前。Nginx 负责接收外部请求，并将其转发到运行在 `http://host.docker.internal:8888`（在 Docker 环境中，对应于 Go 应用监听的端口）的后端 Go 应用。
+
+#### 针对 `/api/v1/network` 的缓存配置
+
+为了提高 `/api/v1/network` 端点的响应速度并减轻后端服务压力，Nginx 对此路径配置了缓存机制。关键配置如下：
+
+- **缓存路径和区域**:
+  ```nginx
+  # 在 http 上下文或 nginx.conf 主配置文件中定义
+  proxy_cache_path /var/cache/nginx/network_cache levels=1:2 keys_zone=network_cache_zone:10m inactive=10m max_size=1g;
+  ```
+  定义了一个名为 `network_cache_zone` 的缓存区域，存储在 Nginx 容器内的 `/var/cache/nginx/network_cache` 路径（该路径已通过 Docker Compose 卷挂载到主机持久化存储 `nginx_cache_data`），最大内存缓存区大小为 10MB（用于存储键和元数据），磁盘上缓存数据最大为 1GB，10 分钟内未访问的缓存将被视为非活动。
+
+- **启用缓存**:
+  在 `server` 块内针对 `/api/v1/network` 的 `location` 块中，通过 `proxy_cache network_cache_zone;` 指令启用了此缓存区域。
+
+  ```nginx
+  location = /api/v1/network {
+      proxy_cache network_cache_zone;
+      # ... 其他缓存相关指令 ...
+      proxy_pass http://host.docker.internal:8888; # 转发到后端Go应用
+      # ... 其他 proxy_set_header 指令 ...
+  }
+  ```
+
+- **缓存键 (Cache Key)**:
+  ```nginx
+  proxy_cache_key "$scheme$request_method$host$uri";
+  ```
+  使用请求的 scheme, method, host 和 URI 组合作为缓存的唯一标识。这意味着对于相同的请求路径（如 `/api/v1/network`），如果这些值都相同，则会命中同一个缓存。
+
+- **缓存有效期**:
+  ```nginx
+  proxy_cache_valid 200 5m;   # 对状态码为 200 的响应缓存 5 分钟
+  proxy_cache_valid 404 1m;   # 对 404 响应缓存 1 分钟
+  ```
+
+- **缓存状态响应头**:
+  ```nginx
+  add_header X-Proxy-Cache $upstream_cache_status;
+  ```
+  向客户端响应中添加 `X-Proxy-Cache` 头部，显示缓存状态（如 HIT, MISS, EXPIRED, BYPASS, UPDATING 等）。
+
+- **缓存绕过逻辑 (Bypass Logic)**:
+  ```nginx
+  # 在 http 上下文或 nginx.conf 主配置文件中定义 map
+  map $args $bypass_the_cache {
+      default 1; # 默认不缓存 (如果请求带有任何查询参数)
+      ""      0; # 如果请求没有查询参数则缓存
+  }
+
+  # 在 location 块中使用
+  proxy_cache_bypass $bypass_the_cache;
+  proxy_no_cache $bypass_the_cache;
+  ```
+  通过 `map` 指令定义了 `$bypass_the_cache` 变量。
+  - 如果请求 URL 包含任何查询参数 (`$args` 不为空)，则 `$bypass_the_cache` 为 1。`proxy_cache_bypass 1;` 会使 Nginx 从上游获取新数据，而 `proxy_no_cache 1;` 则确保这个新的响应不会被存入缓存。
+  - 如果请求 URL 没有查询参数 (`$args` 为空)，则 `$bypass_the_cache` 为 0，Nginx 会正常使用缓存机制（尝试读取缓存或将从上游获取的新响应存入缓存）。
+
+这个配置使得对于无参数的 `/api/v1/network` 请求（通常是获取默认网络视图），Nginx 可以有效地利用缓存提供服务，而对于带参数的特定查询（如指定了 `startNodeCriteria`、`depth` 等）则会绕过缓存，确保获取到针对特定条件的实时数据。
+
+- **处理上游错误时使用过期缓存**:
+  ```nginx
+  proxy_cache_use_stale error timeout updating http_500 http_502 http_503 http_504;
+  ```
+  当与上游服务器通信发生错误、超时，或者正在更新缓存项时，如果存在过期的缓存副本，Nginx 会使用这个过期的副本来响应客户端，而不是直接向上游转发错误。这提高了系统的容错性。
 
 ## 7. 部署指南
 

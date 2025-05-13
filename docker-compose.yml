@@ -95,6 +95,7 @@ services:
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro # 挂载Nginx配置文件 (只读)
       - nginx_cache_data:/var/cache/nginx/network_cache     # 挂载缓存数据卷
+      - nginx_log_data:/var/log/nginx                       # 挂载日志数据卷
     # depends_on 和 app 健康检查已移除，因为 app 不在 compose 管理范围内
     # 如果您的 Go 应用启动较慢，Nginx 可能会在 Go 应用就绪前尝试连接并失败。
     # 您可能需要手动确保 Go 应用已启动，或者为 Nginx 添加更复杂的启动延迟/重试逻辑 (通常在入口脚本中完成)
@@ -108,6 +109,31 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+#  nginx-log-exporter:
+#    image: martinhelmich/prometheus-nginxlog-exporter:v1.10.0
+#    container_name: labelwall-nginx-log-exporter
+#    restart: unless-stopped
+#    ports:
+#      - "4040:4040" # Exporter 监听的端口
+#    volumes:
+#      - nginx_log_data:/var/log/nginx:ro # 只读挂载 Nginx 日志目录
+#      - ./infrastructure/prometheus-nginxlog-exporter/config.yml:/config/config.yml:ro # 挂载 exporter 配置文件
+#    depends_on:
+#      - nginx
+#    command: ["--config-file=/config/config.yml"]
+
+  nginx-prometheus-exporter:
+    image: nginx/nginx-prometheus-exporter:latest # 使用官方 exporter
+    container_name: labelwall-nginx-prometheus-exporter
+    restart: unless-stopped
+    ports:
+      - "9113:9113" # Exporter 默认监听端口
+    command: ["-nginx.scrape-uri", "http://nginx/stub_status"]
+    # 注意: "nginx" 是 docker-compose 中 nginx 服务的名称
+    # Exporter 会通过内部 Docker 网络访问 nginx 服务的 stub_status 端点
+    depends_on:
+      - nginx
+
 # 可选：定义命名卷以持久化数据
 volumes:
 #   neo4j_data:
@@ -117,4 +143,5 @@ volumes:
 #   neo4j_conf:
 #   redis_data:
   grafana_data: {} # 为 Grafana 添加数据卷
-  nginx_cache_data: {} # 为 Nginx 缓存定义命名卷 
+  nginx_cache_data: {} # 为 Nginx 缓存定义命名卷
+  nginx_log_data: {}   # 为 Nginx 日志定义命名卷 

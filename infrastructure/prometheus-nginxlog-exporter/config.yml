@@ -1,0 +1,53 @@
+listen:
+  port: 4040
+  address: "0.0.0.0"
+
+namespace: "nginx" # Prometheus 指标的前缀
+
+log_format: "$prometheus_json" # 告诉 exporter 这是我们之前在 Nginx 中定义的日志格式变量名
+
+format_is_json: true # 明确指出日志是 JSON 格式
+
+# 定义如何从 JSON 日志字段创建 Prometheus 指标
+# 更多信息请参考: https://github.com/martin-helmich/prometheus-nginxlog-exporter
+metrics:
+  - name: http_requests_total
+    type: counter
+    description: "Total number of HTTP requests."
+    json_field_name: remote_addr # 任何存在的字段都可以用来计数
+    labels:
+      - method: $request_method
+      - status: $status
+      - upstream_cache_status: $upstream_cache_status # 缓存命中状态
+
+  - name: http_request_duration_seconds
+    type: histogram
+    description: "Duration of HTTP requests in seconds."
+    json_field_name: request_time # 使用 Nginx 的 $request_time
+    labels:
+      - method: $request_method
+      - status: $status
+    buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+
+  - name: http_upstream_response_duration_seconds
+    type: histogram
+    description: "Duration of HTTP upstream responses in seconds."
+    json_field_name: upstream_response_time # 使用 Nginx 的 $upstream_response_time
+    labels:
+      - method: $request_method
+      - status: $status
+      - upstream_addr: $upstream_addr
+    buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
+
+  - name: http_body_bytes_sent
+    type: counter
+    description: "Total number of body bytes sent to client."
+    json_field_name: body_bytes_sent # 使用 Nginx 的 $body_bytes_sent (这本身就是数字)
+    labels:
+      - method: $request_method
+      - status: $status
+
+# 指定要监控的日志文件
+source:
+  files:
+    - /var/log/nginx/access.log

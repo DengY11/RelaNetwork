@@ -365,11 +365,6 @@ func (d *neo4jNodeDAL) ExecSearchNodes(ctx context.Context, session neo4j.Sessio
 	queryBuilder.WriteString(" SKIP $offset LIMIT $limit")
 	finalQuery := queryBuilder.String()
 
-	// --- 添加日志：打印最终查询和参数 ---
-	fmt.Printf(">>> DAL: Count Query:\n%s\nParams: %v\n", countQuery, countParams)
-	fmt.Printf(">>> DAL: Main Query:\n%s\nParams: %v\n", finalQuery, mainParams)
-	// --- 结束日志 ---
-
 	var nodes []neo4j.Node
 	var labelsList [][]string
 	var total int64
