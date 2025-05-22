@@ -11,6 +11,7 @@ import (
 	"labelwall/biz/repo/neo4jrepo"
 	"labelwall/biz/service"
 	dbInfra "labelwall/infrastructure/database" // Alias database package
+	"labelwall/infrastructure/rabbitmq"         // <--- 新增 RabbitMQ 包导入
 	"labelwall/pkg/cache"
 	"labelwall/pkg/config" // 导入配置包
 
@@ -23,12 +24,13 @@ import (
 )
 
 // Init 函数执行所有应用程序的初始化步骤
-func Init(configPath string) (*server.Hertz, error) {
+// 返回 Hertz 实例、RabbitMQ Publisher (如果启用) 和错误
+func Init(configPath string) (*server.Hertz, *rabbitmq.Publisher, error) {
 
 	cfg, err := config.InitConfig(configPath) //加载配置
 	if err != nil {
 		log.Printf("Error: 加载配置失败: %v", err)
-		return nil, fmt.Errorf("加载配置失败: %w", err)
+		return nil, nil, fmt.Errorf("加载配置失败: %w", err)
 	}
 	log.Println("Info: 配置加载完成.")
 
@@ -66,16 +68,48 @@ func Init(configPath string) (*server.Hertz, error) {
 
 	logger.Info("Zap Logger 初始化完成", zap.String("level", cfg.Logging.Level))
 
+	// 初始化 RabbitMQ Publisher (如果已在配置中启用)
+	var publisher *rabbitmq.Publisher
+	if cfg.RabbitMQ.Enabled {
+		logger.Info("RabbitMQ 已启用，正在初始化 Publisher...", zap.String("url", cfg.RabbitMQ.URL))
+		// 确保 URL 格式正确，如果 vhost 在 URL 中没有，则附加它
+		// RabbitMQ URL 格式: amqp://user:pass@host:port/vhost
+		// 当前 config.yaml 中的 URL "amqp://labelwall_user:labelwall_pass@rabbitmq:5672/" 假定 vhost 是 "/"
+		// 如果 cfg.RabbitMQ.VHost 非空且不是 "/"，您可能需要构建 URL
+		// 例如: amqpURL := fmt.Sprintf("%s%s", cfg.RabbitMQ.URL, cfg.RabbitMQ.VHost)
+		// 这里我们假设 cfg.RabbitMQ.URL 已经包含了 VHost (如果需要) 或者 VHost 是默认的 "/"
+
+		// 暂时使用一个硬编码的 exchange name，后续可以考虑配置化
+		exchangeName := "labelwall_exchange"
+
+		publisher, err = rabbitmq.NewPublisher(cfg.RabbitMQ.URL, exchangeName, logger)
+		if err != nil {
+			logger.Error("初始化 RabbitMQ Publisher 失败", zap.Error(err))
+			// 根据策略，这里可以选择返回错误，或者仅记录并继续 (如果 MQ 不是严格必需的)
+			// 为了安全起见，我们返回错误
+			return nil, nil, fmt.Errorf("初始化 RabbitMQ Publisher 失败: %w", err)
+		}
+		logger.Info("RabbitMQ Publisher 初始化成功", zap.String("exchange", exchangeName))
+	} else {
+		logger.Info("RabbitMQ 未在配置中启用。")
+	}
+
 	// 3.连接数据库
 	driver, err := InitDatabase(logger, &cfg.Database.Neo4j)
 	if err != nil {
 		logger.Error("初始化 Neo4j 失败", zap.Error(err))
-		return nil, fmt.Errorf("初始化 Neo4j 失败: %w", err)
+		if publisher != nil { // 如果 publisher 已初始化，尝试关闭
+			publisher.Close()
+		}
+		return nil, nil, fmt.Errorf("初始化 Neo4j 失败: %w", err)
 	}
 	redisClient, err := InitRedis(logger, &cfg.Database.Redis)
 	if err != nil {
 		logger.Error("初始化 Redis 失败", zap.Error(err))
-		return nil, fmt.Errorf("初始化 Redis 失败: %w", err)
+		if publisher != nil {
+			publisher.Close()
+		}
+		return nil, nil, fmt.Errorf("初始化 Redis 失败: %w", err)
 	}
 	logger.Info("数据库连接初始化完成.")
 
@@ -83,7 +117,10 @@ func Init(configPath string) (*server.Hertz, error) {
 	appCache, err := InitCache(logger, redisClient, &cfg.Cache)
 	if err != nil {
 		logger.Error("初始化缓存失败", zap.Error(err))
-		return nil, fmt.Errorf("初始化缓存失败: %w", err)
+		if publisher != nil {
+			publisher.Close()
+		}
+		return nil, nil, fmt.Errorf("初始化缓存失败: %w", err)
 	}
 	logger.Info("缓存初始化完成.")
 
@@ -113,7 +150,7 @@ func Init(configPath string) (*server.Hertz, error) {
 	logger.Info("Hertz 服务器实例创建完成.")
 	logger.Info("Prometheus metrics 将在 :9091/metrics 路径暴露.")
 
-	return h, nil // 返回 Hertz 实例，让 main 函数注册路由并启动
+	return h, publisher, nil // 返回 Hertz 实例、publisher 和 nil 错误
 }
 
 // InitDatabase 初始化 Neo4j 数据库连接

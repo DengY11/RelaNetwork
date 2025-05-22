@@ -43,3 +43,11 @@ repository:
 # 日志配置 (示例，可以根据需要扩展)
 logging:
   level: "error"                   # 日志级别 (debug, info, warn, error) 
+
+# 新增 RabbitMQ 配置
+rabbitmq:
+  enabled: true
+  url: "amqp://labelwall_user:labelwall_pass@rabbitmq:5672/" # 使用 docker-compose 中的服务名和端口
+  # vhost: "labelwall_vhost" # 如果您在 docker-compose 中定义了 vhost
+  #  可以添加其他参数，如连接池大小等
+  # connection_pool_size: 10

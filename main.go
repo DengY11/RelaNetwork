@@ -4,18 +4,44 @@ package main
 
 import (
 	"labelwall/internal/bootstrap" // 这是初始化包
+	// "labelwall/internal/router"    // 暂时注释掉，如果您的路由在其他地方定义
+	// RabbitMQ 包导入
 	"log"
+	"os"
+	"os/signal"
+	"syscall"
 )
 
 func main() {
 	configPath := "./config.yaml"
 
-	h, err := bootstrap.Init(configPath)
+	h, publisher, err := bootstrap.Init(configPath) // 接收 publisher
 	if err != nil {
 		log.Fatalf("严重: 应用程序初始化失败: %v", err)
 	}
 
-	register(h) // 注册路由
+	// 如果 publisher 被初始化了，确保在程序退出时关闭它
+	if publisher != nil {
+		defer func() {
+			log.Println("Info: 正在关闭 RabbitMQ Publisher...")
+			publisher.Close()
+		}()
+	}
+
+	register(h) // hertz 路由注册
+
 	log.Println("Info: 正在启动 Hertz 服务器...")
-	h.Spin() // 启动服务器并监听
+	go func() {
+		h.Spin() // 在 goroutine 中启动服务器，以便不阻塞信号处理
+	}()
+
+	// 等待中断信号以优雅地关闭服务器 (例如 Ctrl+C)
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Info: 收到关闭信号，正在关闭服务器和资源...")
+
+	// Hertz 服务器的关闭由 h.Spin() 在接收到信号后处理，或通过 h.Shutdown() 方法。
+	// publisher.Close() 通过 defer 保证执行。
+	log.Println("Info: 服务器和资源已关闭。")
 }

@@ -15,6 +15,7 @@ type AppConfig struct {
 	Cache    CacheConfig    `mapstructure:"cache"`
 	Logging  LoggingConfig  `mapstructure:"logging"`
 	Repo     RepoConfig     `mapstructure:"repository"`
+	RabbitMQ RabbitMQConfig `mapstructure:"rabbitmq"`
 }
 
 // ServerConfig 服务器相关配置
@@ -81,6 +82,14 @@ type RepoQueryConfig struct {
 // LoggingConfig 日志相关配置
 type LoggingConfig struct {
 	Level string `mapstructure:"level"`
+}
+
+// RabbitMQConfig RabbitMQ 连接配置 (新增)
+type RabbitMQConfig struct {
+	Enabled bool   `mapstructure:"enabled"`
+	URL     string `mapstructure:"url"`
+	VHost   string `mapstructure:"vhost"`
+	// ConnectionPoolSize int `mapstructure:"connection_pool_size"` // 可选，未来可添加
 }
 
 // GlobalConfig 是全局配置实例

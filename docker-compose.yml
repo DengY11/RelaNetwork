@@ -87,6 +87,25 @@ services:
       prometheus:
         condition: service_healthy
 
+  rabbitmq:
+    image: rabbitmq:3.13-management # 使用带有管理插件的 RabbitMQ 镜像
+    container_name: labelwall-rabbitmq
+    hostname: rabbitmq # 设置 hostname，方便内部通信
+    ports:
+      - "5672:5672"   # AMQP 协议端口
+      - "15672:15672" # 管理界面 HTTP 端口
+    environment:
+      RABBITMQ_DEFAULT_USER: "labelwall_user" # 默认用户名
+      RABBITMQ_DEFAULT_PASS: "labelwall_pass" # 默认密码 (请在生产环境中更改)
+      # RABBITMQ_DEFAULT_VHOST: "labelwall_vhost" # 可以定义一个虚拟主机，如果需要隔离
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq # 持久化 RabbitMQ 数据
+    healthcheck:
+      test: rabbitmq-diagnostics -q ping
+      interval: 30s
+      timeout: 30s
+      retries: 3
+
   nginx:
     image: nginx:latest
     container_name: labelwall-nginx-proxy
@@ -142,6 +161,7 @@ volumes:
 #   neo4j_plugins:
 #   neo4j_conf:
 #   redis_data:
+  rabbitmq_data: {} # 为 RabbitMQ 添加数据卷
   grafana_data: {} # 为 Grafana 添加数据卷
   nginx_cache_data: {} # 为 Nginx 缓存定义命名卷
   nginx_log_data: {}   # 为 Nginx 日志定义命名卷 
